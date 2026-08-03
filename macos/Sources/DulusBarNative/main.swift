@@ -7,10 +7,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: PanelController?
     private var webSocket: WebSocketClient?
     private var parentTimer: Timer?
+    private var statusItem: NSStatusItem?
+    private var brandImage: NSImage?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureBranding()
+        configureStatusItem()
         panelController = PanelController(model: model)
 
         let url = Self.webSocketURL()
@@ -35,7 +38,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ), let image = NSImage(contentsOf: url) else { return }
 
         image.isTemplate = false
+        brandImage = image
         NSApp.applicationIconImage = image
+    }
+
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            button.image = brandImage
+            button.image?.size = NSSize(width: 19, height: 19)
+            button.imageScaling = .scaleProportionallyDown
+            button.toolTip = "Dulus Bar"
+        }
+
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Show island", action: #selector(showIsland), keyEquivalent: "")
+        menu.addItem(withTitle: "Open Dulus Bar folder", action: #selector(openProjectFolder), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Dulus Bar", action: #selector(quitApplication), keyEquivalent: "q")
+        menu.items.forEach { $0.target = self }
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func showIsland() {
+        model.reveal()
+    }
+
+    @objc private func openProjectFolder() {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        NSWorkspace.shared.open(root)
+    }
+
+    @objc private func quitApplication() {
+        NSApp.terminate(nil)
     }
 
     private static func webSocketURL() -> URL {
