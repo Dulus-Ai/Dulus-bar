@@ -53,8 +53,8 @@ top-center to reveal it; right-click the tray icon for the menu.
 <summary><strong>From source (for the wired-agent extras)</strong></summary>
 
 ```bash
-git clone https://github.com/dulus-ai/dulus-bar.git
-cd dulus-bar
+git clone https://github.com/Dulus-Ai/Dulus-bar.git
+cd Dulus-bar
 
 # macOS / Linux
 ./setup.sh

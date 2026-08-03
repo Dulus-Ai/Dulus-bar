@@ -43,9 +43,9 @@ build = ["pyinstaller>=6.0"]
 dulusbar = "dulus_bar.main:main"
 
 [project.urls]
-Homepage = "https://github.com/dulus-ai/dulus-bar"
-Repository = "https://github.com/dulus-ai/dulus-bar"
-Issues = "https://github.com/dulus-ai/dulus-bar/issues"
+Homepage = "https://github.com/Dulus-Ai/Dulus-bar"
+Repository = "https://github.com/Dulus-Ai/Dulus-bar"
+Issues = "https://github.com/Dulus-Ai/Dulus-bar/issues"
 
 [tool.setuptools.packages.find]
 include = ["dulus_bar*"]
