@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dulus-bar"
-version = "0.3.0"
+version = "0.3.1"
 description = "Dulus Bar — a cross-platform Dynamic Island for your AI agents (Windows / macOS / Linux)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,8 @@ build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 dulusbar = "dulus_bar.main:main"
+# Alias so the natural guess (matching the pip name) also works.
+dulus-bar = "dulus_bar.main:main"
 
 [project.urls]
 Homepage = "https://github.com/Dulus-Ai/Dulus-bar"
