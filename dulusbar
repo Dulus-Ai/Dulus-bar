@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# dulusbar (macOS / Linux) — start Dulus Bar and (optionally) Dulus, wired together.
+#
+# Usage:
+#   ./dulusbar                     # bar + Dulus
+#   ./dulusbar "fix the webhook"   # bar + Dulus with a prompt
+#   ./dulusbar --island-only       # just the bar
+#   ./dulusbar --dulus-only        # just Dulus (bar assumed already running)
+#   ./dulusbar --dulus /path/to/dulus.py [args...]
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
+
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || { echo "[dulusbar] $PY not found on PATH"; exit 1; }
+
+ISLAND_ONLY=0
+DULUS_ONLY=0
+DULUS_PATH=""
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --island-only) ISLAND_ONLY=1; shift ;;
+    --dulus-only)  DULUS_ONLY=1; shift ;;
+    --dulus)       DULUS_PATH="${2:-}"; shift 2 ;;
+    *)             ARGS+=("$1"); shift ;;
+  esac
+done
+
+ws_alive() { "$PY" "$ROOT/wrappers/_ws_health.py" >/dev/null 2>&1; }
+
+start_bar() {
+  if ws_alive; then
+    echo "[dulusbar] already running on ws://127.0.0.1:17372"
+    return
+  fi
+  echo "[dulusbar] starting Dulus Bar..."
+  # nohup so the bar keeps running after this script returns. Keep a log: the
+  # native macOS helper and Python WebSocket hub are separate processes.
+  nohup "$PY" -m dulus_bar >"${DULUS_BAR_LOG:-/tmp/dulusbar.log}" 2>&1 &
+  for _ in $(seq 1 50); do
+    sleep 0.2
+    if ws_alive; then echo "[dulusbar] up, websocket ALIVE"; return; fi
+  done
+  echo "[dulusbar] bar did not answer the websocket in time (check PyQt6 / display)."
+}
+
+if [[ "$DULUS_ONLY" -eq 0 ]]; then
+  start_bar
+fi
+if [[ "$ISLAND_ONLY" -eq 1 ]]; then
+  echo "[dulusbar] done. Bar running. For Dulus: ./dulusbar --dulus-only"
+  exit 0
+fi
+
+CMD=("$PY" "$ROOT/wrappers/dulus_wrapper.py")
+if [[ -n "$DULUS_PATH" ]]; then
+  CMD+=(--dulus "$DULUS_PATH")
+fi
+if [[ ${#ARGS[@]} -gt 0 ]]; then
+  CMD+=("${ARGS[@]}")
+fi
+
+echo "[dulusbar] launching Dulus wired to the bar..."
+exec "${CMD[@]}"

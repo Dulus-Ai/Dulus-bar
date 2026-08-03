@@ -1,0 +1,14 @@
+# Core (all platforms)
+PyQt6>=6.4.0
+websockets>=12.0
+psutil>=5.9.0
+
+# Windows-only: win32 window management
+pywin32>=306; sys_platform == "win32"
+
+# macOS-only: camera-notch detection + always-visible NSWindow
+pyobjc-framework-Cocoa>=9.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=9.0; sys_platform == "darwin"
+
+# Linux X11 window activation uses external `wmctrl` / `xdotool` (install via your
+# package manager); no extra Python deps required.
