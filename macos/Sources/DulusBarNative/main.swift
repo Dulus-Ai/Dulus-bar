@@ -53,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(withTitle: "Show island", action: #selector(showIsland), keyEquivalent: "")
+        menu.addItem(withTitle: "Open Dulus", action: #selector(openDulus), keyEquivalent: "")
+        menu.addItem(makeAgentMenuItem())
         menu.addItem(withTitle: "Open Dulus Bar folder", action: #selector(openProjectFolder), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Dulus Bar", action: #selector(quitApplication), keyEquivalent: "q")
@@ -63,6 +65,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showIsland() {
         model.reveal()
+    }
+
+    private func makeAgentMenuItem() -> NSMenuItem {
+        let root = NSMenuItem(title: "Open agent…", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Open agent…")
+        let agents = [
+            ("Claude Code", "claude"),
+            ("Codex", "codex"),
+            ("Gemini", "gemini"),
+            ("OpenCode", "opencode"),
+            ("Aider", "aider"),
+            ("Ollama", "ollama")
+        ]
+        var found = false
+        for (title, command) in agents where executableExists(command) {
+            let item = NSMenuItem(title: title, action: #selector(openKnownAgent(_:)), keyEquivalent: "")
+            item.representedObject = command
+            item.target = self
+            submenu.addItem(item)
+            found = true
+        }
+        if found { submenu.addItem(.separator()) }
+        let custom = NSMenuItem(title: "Choose any AI or executable…", action: #selector(chooseAgent), keyEquivalent: "")
+        custom.target = self
+        submenu.addItem(custom)
+        root.submenu = submenu
+        return root
+    }
+
+    private func executableExists(_ command: String) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        task.arguments = [command]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    @objc private func openDulus() {
+        launchInTerminal(command: "dulus")
+    }
+
+    @objc private func openKnownAgent(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        launchInTerminal(command: command)
+    }
+
+    @objc private func chooseAgent() {
+        let picker = NSOpenPanel()
+        picker.title = "Choose any AI CLI or executable"
+        picker.prompt = "Open in Terminal"
+        picker.canChooseFiles = true
+        picker.canChooseDirectories = false
+        picker.allowsMultipleSelection = false
+        guard picker.runModal() == .OK, let url = picker.url else { return }
+        launchInTerminal(command: shellQuote(url.path))
+    }
+
+    private func launchInTerminal(command: String) {
+        let script = "tell application \"Terminal\" to do script \(String(reflecting: command))\ntell application \"Terminal\" to activate"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        try? task.run()
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     @objc private func openProjectFolder() {
