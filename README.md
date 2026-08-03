@@ -1,21 +1,104 @@
-# Dulus Bar 🦅
+<h1 align="center">Dulus Bar 🦅</h1>
 
-**A cross-platform Dynamic Island for your AI agents — free, native, no subscription.**
+<p align="center">
+  <strong>A cross-platform Dynamic Island for your AI agents.</strong><br>
+  Free. Native. MIT. Works with <em>any</em> agent — no account, no cloud, no lock-in.
+</p>
+
+<p align="center">
+  <code>pip install dulus-bar</code>
+</p>
+
+<p align="center">
+  <img alt="MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-lightgrey">
+</p>
+
+---
 
 Dulus Bar puts a floating status island at the top of your screen that shows every
-AI coding agent you're running — Dulus, Claude Code, Codex, Gemini, Cursor, and any
-other CLI — and lets you **Allow / Deny** their permission prompts without diving
-back into the terminal.
+AI coding agent you're running — Claude Code, Codex, Gemini, Cursor, Dulus, and
+any other CLI — and lets you **Allow / Deny** their permission prompts without
+diving back into a terminal.
+
+It's the idea itself, shipped for everyone. **Not tied to Dulus** — wrap any agent
+and it shows up. We built the island we wanted; here it is for the whole world. 🌎
 
 - **All platforms** — Windows, macOS, and Linux.
 - **macOS notch-native** — on MacBooks with a camera notch the island hugs the
   notch and stays visible across every Space and full-screen app.
-- **All agents** — anything with a CLI works through a thin wrapper; well-known
+- **Reveal on hover** — everywhere else it rests as a slim tab at the top edge and
+  slides open when your mouse approaches, or when an agent needs you.
+- **Any agent** — anything with a CLI works through a thin wrapper; well-known
   agents get their own icon and accent color.
-- **Dulus extras** — for Dulus, the island also shows the active **model** and
-  **context usage** live.
-- **100% local** — no cloud, no account, no telemetry. One websocket on
+- **100% local** — no cloud, no account, no telemetry. One WebSocket on
   `127.0.0.1:17372`.
+
+---
+
+## Install
+
+Requires Python 3.10+.
+
+```bash
+pip install dulus-bar
+dulusbar
+```
+
+That's it — the island appears at the top of your screen. Move your mouse to the
+top-center to reveal it; right-click the tray icon for the menu.
+
+<details>
+<summary><strong>From source (for the wired-agent extras)</strong></summary>
+
+```bash
+git clone https://github.com/dulus-ai/dulus-bar.git
+cd dulus-bar
+
+# macOS / Linux
+./setup.sh
+
+# Windows
+.\setup.ps1
+```
+
+> Linux tip: for click-to-focus of a terminal on X11, install `wmctrl` or `xdotool`.
+>
+> macOS: `setup.sh` also builds the native SwiftUI/AppKit notch surface using the
+> Swift toolchain in Xcode Command Line Tools. The Python process stays the local
+> WebSocket hub; Windows and Linux use the PyQt overlay.
+
+</details>
+
+---
+
+## Wire up any AI agent — zero monopoly
+
+Dulus Bar is **agent-agnostic**. Wrap any CLI and it reports to the island:
+
+```bash
+python wrappers/agent_wrapper.py "Codex" codex fix auth bug
+python wrappers/agent_wrapper.py "Gemini" gemini
+python wrappers/claude_wrapper.py            # Claude Code helper
+```
+
+`agent_wrapper.py "Display Name" <command> [args...]` reports that agent to the
+bar. Known names (Claude, Codex, Gemini, Cursor, Copilot, Kimi, DeepSeek, Grok,
+Qwen, Mistral, Windsurf, Zed, Aider, Ollama, …) get a curated icon + color;
+anything else gets a stable auto-assigned color.
+
+Or **right-click the island → Open agent…** and pick any executable from a file
+dialog — Dulus Bar launches it in its own terminal, already wired.
+
+---
+
+## Works beautifully with Dulus (optional)
+
+If you run [Dulus](https://dulus.ai), the island also shows the active **model**
+and live **context usage** — e.g. `kimi/kimi-k2.5 · ctx 38%`. But you never need
+Dulus to use Dulus Bar. The bar is the gift; Dulus is just one of many agents it
+speaks to.
 
 ---
 
@@ -25,143 +108,41 @@ back into the terminal.
 - Lists active agents with a live status dot (running / waiting / done / error).
 - When an agent asks for permission, shows **Allow / Deny** right on the island and
   forwards your choice back to the agent over stdin.
+- Reveals on hover, pops open on agent activity, and **stays open on a permission
+  request** until you answer.
 - Click an agent to jump to its terminal / editor window.
-- For **Dulus**: shows model + context (e.g. `kimi/kimi-k2.5 · ctx 38%`).
 
 ---
 
-## Install
+## How it works
 
-Requires Python 3.10+.
+Agents connect to a tiny local WebSocket hub and send status; the island renders
+it and relays your Allow/Deny back.
 
-On macOS, `setup.sh` also builds the native SwiftUI/AppKit notch surface with
-the Swift toolchain included in Xcode Command Line Tools. The Python process
-remains the local WebSocket hub; Windows and Linux use the PyQt overlay.
+**Agent → bar:**
+```json
+{ "agent": "Claude", "type": "tool_request", "session_id": "abc123",
+  "payload": { "tool": "Bash", "args": "rm -rf build/" } }
+```
+Event types: `session_started`, `message`, `tool_request`, `tool_approved`,
+`tool_denied`, `completed`, `error`. (`model` / `ctx` payload fields are optional.)
 
-### macOS / Linux
-
-```bash
-git clone https://bitbucket.org/dulus-ai/dulus-bar.git
-cd dulus-bar
-./setup.sh          # installs deps, makes ./dulusbar executable
+**Bar → agent (Allow/Deny):**
+```json
+{ "type": "decision", "session_id": "abc123", "payload": { "approved": true } }
 ```
 
-> Linux tip: for click-to-focus of a terminal on X11, install `wmctrl` or `xdotool`.
-
-### Windows
-
-```powershell
-git clone https://bitbucket.org/dulus-ai/dulus-bar.git
-cd dulus-bar
-.\setup.ps1         # installs deps + PowerShell aliases
 ```
-
-### Manual (any OS)
-
-```bash
-python -m venv .venv
-# macOS/Linux: source .venv/bin/activate   |   Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
+dulus_bar/
+  overlay.py        Floating island UI (PyQt6), notch-aware + reveal-on-hover
+  server.py         WebSocket hub (ws://127.0.0.1:17372)
+  agents.py         Per-agent icon + accent color registry
+  native/           win32 / pyobjc / wmctrl window focus per platform
+wrappers/
+  base_wrapper.py   Shared: pipe stdio, detect prompts, inject Allow/Deny
+  agent_wrapper.py  Generic wrapper for any CLI agent
+macos/              Native SwiftUI/AppKit notch surface
 ```
-
----
-
-## Run
-
-### Just the bar
-
-```bash
-python -m dulus_bar
-# or, after install:
-dulusbar
-```
-
-### Bar + Dulus, wired together
-
-**macOS / Linux**
-
-```bash
-./dulusbar                       # bar + Dulus
-./dulusbar "fix the webhook"     # with a prompt
-./dulusbar -m kimi/kimi-k2.5     # pick a model (shown on the island)
-./dulusbar --island-only         # just the bar
-./dulusbar --dulus /path/to/dulus.py
-```
-
-**Windows**
-
-```powershell
-.\connect.ps1                    # bar + Dulus
-.\connect.ps1 "fix the webhook"
-.\connect.ps1 -IslandOnly        # just the bar
-# or double-click connect.cmd / START_HERE.cmd
-```
-
-After `setup.ps1`, Windows also gets aliases: `dulusbar`, `dulusbar-only`,
-`dulus-connect`.
-
-### macOS native surface controls
-
-The native surface rests almost entirely inside the physical notch. Hover or
-click it to expand; incoming agent activity expands it briefly, and permission
-requests stay open until **Allow** or **Deny** is selected. It uses a
-non-activating `NSPanel`, so it does not steal focus from your terminal.
-
-Useful diagnostics:
-
-```bash
-DULUS_BAR_FORCE_QT=1 python -m dulus_bar       # force cross-platform fallback
-DULUS_BAR_NATIVE_REQUIRED=1 python -m dulus_bar # fail instead of falling back
-DULUS_BAR_LOG=/tmp/dulusbar.log ./dulusbar --island-only
-```
-
----
-
-## Connect an agent from the island (right-click)
-
-**Right-click the island** for a menu:
-
-- **Open agent…** — pick any agent executable/script from a file dialog; Dulus
-  Bar launches it in its own terminal, already wired to the bar. Messages and
-  Allow/Deny start flowing instantly.
-- **Open Dulus** — launches your resolved `dulus.py` wired up.
-- **Quick-launch** — any known agent found on your `PATH` (Claude, Codex,
-  Gemini, Cursor, Aider…) appears as a one-click entry.
-
-> Why launch instead of "attach" to an already-running agent? Showing messages
-> and injecting Allow/Deny needs the agent's stdio, which only the process that
-> spawned it can pipe. So Dulus Bar starts the agent for you (through a thin
-> wrapper) rather than trying to hook one that's already running.
-
-## Any AI agent
-
-Dulus Bar is agent-agnostic. Wrap any CLI:
-
-```bash
-python wrappers/agent_wrapper.py "Codex" codex fix auth bug
-python wrappers/agent_wrapper.py "Gemini" gemini
-python wrappers/claude_wrapper.py            # Claude Code helper
-```
-
-`agent_wrapper.py "Display Name" <command> [args...]` reports that agent to the bar.
-Known names (Claude, Codex, Gemini, Cursor, Copilot, Kimi, DeepSeek, Grok, Qwen,
-Mistral, Windsurf, Zed, Aider, Ollama, …) get a curated icon + color; anything else
-gets a stable auto-assigned color.
-
----
-
-## How Dulus is resolved
-
-Dulus Bar finds your local `dulus.py` without hardcoding, in this order:
-
-1. `--dulus PATH` flag, or env `DULUS_BAR_PATH` / `DULUS_PATH`
-2. `dulus_path.txt` next to the repo
-3. `~/.dulus/dulus_bar_dulus_path.txt`
-4. Known local locations
-5. `dulus` on `PATH`
-
-The first working path is remembered automatically.
 
 ---
 
@@ -172,69 +153,29 @@ pip install pyinstaller
 pyinstaller --noconfirm DulusBar.spec
 ```
 
-Output goes to `dist/` — `DulusBar.exe` on Windows, `DulusBar.app` on macOS
+Output lands in `dist/` — `DulusBar.exe` on Windows, `DulusBar.app` on macOS
 (bundled as an `LSUIElement`, so no Dock icon).
-
----
-
-## Architecture
-
-```
-dulus_bar/
-  overlay.py        Floating island UI (PyQt6), notch-aware placement
-  server.py         WebSocket hub (ws://127.0.0.1:17372)
-  agents.py         Per-agent icon + accent color registry
-  native/           Cross-platform native layer
-    windows.py        win32 window focus
-    macos.py          notch geometry + always-visible NSWindow (pyobjc)
-    linux.py          wmctrl / xdotool window focus
-wrappers/
-  base_wrapper.py   Shared: pipe stdio, detect prompts, inject Allow/Deny
-  dulus_wrapper.py  Dulus — also reports model + ctx
-  agent_wrapper.py  Generic wrapper for any CLI agent
-  paths.py          Auto-resolve dulus.py
-```
-
-### WebSocket protocol
-
-Agents → bar:
-
-```json
-{ "agent": "Dulus", "type": "message", "session_id": "abc123",
-  "payload": { "text": "writing tests...", "model": "kimi/kimi-k2.5", "ctx": "38%" } }
-```
-
-Event types: `session_started`, `message`, `tool_request`, `tool_approved`,
-`tool_denied`, `completed`, `error`. (`model` / `ctx` are optional and only
-rendered for Dulus.)
-
-Bar → agent (Allow/Deny):
-
-```json
-{ "agent": "Dulus", "type": "decision", "session_id": "abc123",
-  "payload": { "approved": true } }
-```
 
 ---
 
 ## Platform notes
 
-- **Windows** — fully tested. Uses `pywin32` for window focus.
-- **macOS** — notch hugging + always-visible use `pyobjc` (installed automatically
-  on macOS). Without pyobjc it still runs as a plain top-most island.
+- **Windows** — fully tested. `pywin32` for window focus; PyQt overlay with
+  reveal-on-hover.
+- **macOS** — notch hugging + always-visible via `pyobjc`. Without it, still runs
+  as a plain top-most island.
 - **Linux** — X11 window focus via `wmctrl`/`xdotool`; on Wayland the island shows
-  and stays on top, but jump-to-terminal is best-effort.
+  and stays on top, jump-to-terminal is best-effort.
 
 ---
 
-## Roadmap
+## Contributing
 
-- [ ] Pixel-perfect notch merge (squared top corners) on macOS.
-- [ ] Native bridge to Dulus's ApprovalRuntime (no stdout parsing).
-- [ ] Auto-detect already-running agents without a wrapper.
-- [ ] Multi-monitor placement.
-- [ ] Packaged installers (MSIX / notarized .dmg / AppImage).
+PRs welcome — new agent icons/colors, platform fixes, packaging. Open an issue,
+fork it, ship it.
 
 ## License
 
-MIT — use it, fork it, ship it.
+**MIT.** Use it, fork it, ship it. We shipped the idea on purpose — no monopoly.
+
+<p align="center"><sub>Built by one builder in the Dominican Republic 🇩🇴 — for everyone. 🦅</sub></p>

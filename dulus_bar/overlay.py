@@ -8,7 +8,9 @@ and — for Dulus specifically — surfaces the active model and context usage.
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -57,6 +59,17 @@ BAD = "#f87171"
 IDLE = "#71717a"
 
 ROW_HEIGHT = 46
+
+# --- notch-style auto-hide (Qt overlay: Windows / Linux) ------------------
+# Mirrors the macOS notch surface: the island rests as a slim "peek" tab flush
+# with the top edge and reveals on hover over the top-center zone, on agent
+# activity (briefly), or on a permission request (staying open until answered).
+# Disable with DULUS_BAR_NO_AUTOHIDE=1 to keep the classic always-visible pill.
+PEEK_WIDTH = 132
+PEEK_HEIGHT = 6
+HOT_ZONE_HEIGHT = 26   # px below the top edge that counts as "hovering the notch"
+HOT_ZONE_PAD = 52      # px of horizontal slack on each side of the island
+BRIEF_REVEAL_MS = 2600  # how long agent activity peeks the island open
 
 STATUS_COLORS = {
     "running": GOOD,
@@ -281,10 +294,20 @@ class DulusBarOverlay(QMainWindow):
         self.current_permission: Optional[AgentEvent] = None
         self._configured_native = False
 
+        # Notch-style auto-hide. On by default (Windows/Linux Qt overlay); the
+        # native macOS surface handles its own notch behaviour separately.
+        self._autohide = os.environ.get("DULUS_BAR_NO_AUTOHIDE") not in ("1", "true", "True")
+        self.revealed = not self._autohide  # tucked to a peek until hovered
+        self.permission_pinned = False      # stay revealed while a prompt is open
+        self._reveal_until = 0.0            # monotonic deadline for a brief peek
+
         self._init_window()
         self._init_ui()
         self._reposition()
         self._init_refresh_timer()
+        self._init_hover_timer()
+        if self._autohide:
+            self._apply_geometry()  # start tucked
 
     # --- setup ----------------------------------------------------------
     def _init_window(self) -> None:
@@ -315,8 +338,10 @@ class DulusBarOverlay(QMainWindow):
         pill_row.setContentsMargins(16, 0, 16, 0)
         pill_row.setSpacing(8)
 
-        self.icon_label = QLabel("🦅")
+        self.icon_label = QLabel()
         self.icon_label.setFont(QFont(FONT_FAMILY, 13))
+        self._bird_pixmap = self._load_bird_pixmap(20)
+        self._apply_pill_icon(None)  # brand bird by default
         pill_row.addWidget(self.icon_label)
 
         self.status_label = QLabel(APP_NAME)
@@ -368,6 +393,15 @@ class DulusBarOverlay(QMainWindow):
         self.panel_layout.addLayout(self.sessions_container)
         self.panel_layout.addStretch()
 
+        # --- collapsed "peek" tab (notch rest state) ---
+        # A slim bar flush with the top edge. When tucked this is all that shows;
+        # hovering the top-center zone reveals the full pill.
+        self.peek = QWidget()
+        self.peek.setObjectName("peek")
+        self.peek.setFixedSize(PEEK_WIDTH, PEEK_HEIGHT)
+        self.peek.setVisible(False)
+        self._style_peek(PILL_BORDER)
+
         # --- permission toast ---
         self._build_toast()
 
@@ -377,6 +411,7 @@ class DulusBarOverlay(QMainWindow):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(8)
         col.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addWidget(self.peek, alignment=Qt.AlignmentFlag.AlignHCenter)
         col.addWidget(self.pill, alignment=Qt.AlignmentFlag.AlignHCenter)
         col.addWidget(self.panel, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(container)
@@ -441,6 +476,12 @@ class DulusBarOverlay(QMainWindow):
         geo = screen.geometry()
         width = self.width()
         x = geo.x() + (geo.width() - width) // 2
+
+        if self._autohide and not self.revealed:
+            # Tucked: peek sits flush against the very top edge, like a notch nub.
+            y = geo.y()
+            self.move(x, y)
+            return
 
         notch = native.notch_geometry()
         if notch is not None:
@@ -544,11 +585,18 @@ class DulusBarOverlay(QMainWindow):
                 ctx=payload.get("ctx", ""),
             )
 
+        # Agent activity peeks the island open briefly (permission requests pin
+        # it open via _show_permission, so don't override that here).
+        if event.event_type != "tool_request":
+            self._reveal(brief=True)
         self._refresh_ui()
 
     # --- permissions ----------------------------------------------------
     def _show_permission(self, event: AgentEvent) -> None:
         self.pending_permissions.append(event)
+        # A permission request forces the island fully open and pins it there
+        # until the user answers — same as the macOS notch surface.
+        self._reveal(pin=True)
         if not self.toast_visible:
             self._render_next_permission()
 
@@ -557,6 +605,7 @@ class DulusBarOverlay(QMainWindow):
             self.toast.setVisible(False)
             self.toast_visible = False
             self.current_permission = None
+            self.permission_pinned = False  # free the island to tuck again
             return
 
         event = self.pending_permissions[0]
@@ -605,6 +654,20 @@ class DulusBarOverlay(QMainWindow):
         return 12 + 16 + 6 + body + 12
 
     def _apply_geometry(self) -> None:
+        # Tucked: show only the slim peek tab flush with the top edge.
+        if self._autohide and not self.revealed:
+            self.peek.setVisible(True)
+            self.pill.setVisible(False)
+            self.panel.setVisible(False)
+            self.setFixedHeight(PEEK_HEIGHT + 6)
+            self.setFixedWidth(PEEK_WIDTH + 8)
+            self._reposition()
+            self._position_toast()
+            return
+
+        # Revealed: full pill (optionally with the expanded panel).
+        self.peek.setVisible(False)
+        self.pill.setVisible(True)
         if self.expanded:
             ph = self._panel_height()
             self.panel.setFixedHeight(ph)
@@ -625,6 +688,102 @@ class DulusBarOverlay(QMainWindow):
         self._apply_geometry()
         self._refresh_ui()
 
+    # --- brand icon -----------------------------------------------------
+    def _load_bird_pixmap(self, px: int) -> Optional[QtGui.QPixmap]:
+        """Load the Dulus bird, crisp on HiDPI (devicePixelRatio-aware)."""
+        path = Path(__file__).resolve().parent / "assets" / "dulus-bird.png"
+        if not path.is_file():
+            return None
+        src = QtGui.QPixmap(str(path))
+        if src.isNull():
+            return None
+        screen = QApplication.primaryScreen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        pm = src.scaledToHeight(
+            max(1, int(px * dpr)), Qt.TransformationMode.SmoothTransformation
+        )
+        pm.setDevicePixelRatio(dpr)
+        return pm
+
+    def _apply_pill_icon(self, agent: Optional[str]) -> None:
+        """Brand bird for Dulus / idle; the agent's own emoji for everyone else."""
+        if (agent is None or is_dulus(agent)) and self._bird_pixmap is not None:
+            self.icon_label.setPixmap(self._bird_pixmap)
+        else:
+            self.icon_label.clear()
+            self.icon_label.setText(style_for(agent).emoji if agent else "🦅")
+
+    # --- notch auto-hide (reveal on hover / activity / permission) -------
+    def _style_peek(self, color: str) -> None:
+        radius = PEEK_HEIGHT // 2
+        self.peek.setStyleSheet(
+            f"#peek {{ background-color: {color}; border-radius: {radius}px; }}"
+        )
+
+    def _refresh_peek(self) -> None:
+        """Tint the resting peek so activity is visible without revealing."""
+        statuses = [s.status for s in self.sessions.values()]
+        if "waiting" in statuses:
+            color = WARN
+        elif "error" in statuses:
+            color = BAD
+        elif "running" in statuses:
+            color = GOOD
+        else:
+            color = PILL_BORDER
+        self._style_peek(color)
+
+    def _init_hover_timer(self) -> None:
+        self._hover_timer = QTimer(self)
+        self._hover_timer.timeout.connect(self._poll_cursor)
+        self._hover_timer.start(120)
+
+    def _hot_zone(self) -> QtCore.QRect:
+        """Top-center strip that behaves like the macOS notch hover target."""
+        screen = QApplication.primaryScreen()
+        geo = screen.geometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
+        w = max(self.width(), PEEK_WIDTH) + 2 * HOT_ZONE_PAD
+        x = geo.x() + (geo.width() - w) // 2
+        return QtCore.QRect(x, geo.y(), w, HOT_ZONE_HEIGHT)
+
+    def _cursor_near(self) -> bool:
+        pos = QtGui.QCursor.pos()
+        if self._hot_zone().contains(pos):
+            return True
+        # Once revealed, hovering anywhere over the island keeps it open.
+        return self.revealed and self.geometry().contains(pos)
+
+    def _poll_cursor(self) -> None:
+        if not self._autohide:
+            return
+        if self._cursor_near():
+            self._reveal()
+        else:
+            self._maybe_tuck()
+
+    def _reveal(self, *, brief: bool = False, pin: bool = False) -> None:
+        if pin:
+            self.permission_pinned = True
+        if brief:
+            self._reveal_until = time.monotonic() + BRIEF_REVEAL_MS / 1000.0
+        if self._autohide and not self.revealed:
+            self.revealed = True
+            self._apply_geometry()
+            self._refresh_ui()
+
+    def _maybe_tuck(self) -> None:
+        if not self._autohide or not self.revealed:
+            return
+        # Never tuck while the user is engaged or a decision is pending.
+        if self.expanded or self.permission_pinned or self.toast_visible:
+            return
+        if time.monotonic() < self._reveal_until:
+            return
+        if self._cursor_near():
+            return
+        self.revealed = False
+        self._apply_geometry()
+
     # --- render ---------------------------------------------------------
     def _foremost(self) -> Optional[Session]:
         pool = [s for s in self.sessions.values() if s.status in ("running", "waiting")]
@@ -641,11 +800,11 @@ class DulusBarOverlay(QMainWindow):
 
         if front is not None:
             st = style_for(front.agent)
-            self.icon_label.setText(st.emoji)
+            self._apply_pill_icon(front.agent)
             self.status_label.setText(st.display)
             self.meta_label.setText(self._pill_meta(front))
         else:
-            self.icon_label.setText("🦅")
+            self._apply_pill_icon(None)
             self.status_label.setText(APP_NAME)
             self.meta_label.setText("")
 
@@ -657,6 +816,7 @@ class DulusBarOverlay(QMainWindow):
 
         self.icon_label.adjustSize()
         self._prune()
+        self._refresh_peek()
         if self.expanded:
             self._rebuild_rows()
         self._apply_geometry()
@@ -837,22 +997,74 @@ class TrayApp:
         self.tray.setToolTip(APP_NAME)
         self.tray.activated.connect(self._on_tray_click)
 
+        ov = self.overlay
         menu = QtWidgets.QMenu()
+        menu.setStyleSheet(
+            f"QMenu {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER}; "
+            f"border-radius: 10px; padding: 6px; font-size: 12px; }}"
+            f"QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}"
+            f"QMenu::item:selected {{ background: {BG_HOVER}; }}"
+            f"QMenu::separator {{ height: 1px; background: {BORDER}; margin: 6px 8px; }}"
+        )
+
         show_action = menu.addAction("Show island")
         if show_action is not None:
-            show_action.triggered.connect(self.overlay.show)
-        open_agent = menu.addAction("Open agent…")
-        if open_agent is not None:
-            open_agent.triggered.connect(self.overlay._open_agent_dialog)
+            show_action.triggered.connect(ov.show)
+
+        # Open Dulus — only if the wrapper ships alongside (matches macOS menu).
+        if (ov._repo_root() / "wrappers" / "dulus_wrapper.py").exists():
+            open_dulus = menu.addAction("🦅  Open Dulus")
+            if open_dulus is not None:
+                open_dulus.triggered.connect(ov._open_dulus)
+
+        # Open agent… — submenu of detected agents + "choose any", like macOS.
+        agent_menu = menu.addMenu("Open agent…")
+        if agent_menu is not None:
+            agent_menu.setStyleSheet(menu.styleSheet())
+            installed = detect_installed()
+            for st, exe in installed:
+                act = agent_menu.addAction(f"{st.emoji}  {st.display}")
+                if act is not None:
+                    act.triggered.connect(
+                        lambda _=False, n=st.display, e=exe: ov._launch_agent(n, [e])
+                    )
+            if installed:
+                agent_menu.addSeparator()
+            choose = agent_menu.addAction("Choose any AI or executable…")
+            if choose is not None:
+                choose.triggered.connect(ov._open_agent_dialog)
+
+        folder = menu.addAction("Open Dulus Bar folder")
+        if folder is not None:
+            folder.triggered.connect(self._open_project_folder)
+
         open_docs = menu.addAction("Open docs")
         if open_docs is not None:
             open_docs.triggered.connect(lambda: webbrowser.open(DOCS_URL))
+
         menu.addSeparator()
-        quit_action = menu.addAction("Quit")
+        quit_action = menu.addAction("Quit Dulus Bar")
         if quit_action is not None:
             quit_action.triggered.connect(self.app.quit)
+
         self.tray.setContextMenu(menu)
         self.tray.show()
+
+    def _open_project_folder(self) -> None:
+        root = str(self.overlay._repo_root())
+        try:
+            if sys.platform == "win32":
+                os.startfile(root)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+
+                subprocess.Popen(["open", root])
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", root])
+        except Exception:
+            pass
 
     def _on_tray_click(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
