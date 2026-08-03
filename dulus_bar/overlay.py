@@ -821,11 +821,16 @@ class TrayApp:
         self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
 
     def build(self) -> None:
-        icon = QIcon.fromTheme("utilities-terminal")
+        brand_icon = Path(__file__).resolve().parent / "assets" / "dulus-bird.png"
+        icon = QIcon(str(brand_icon)) if brand_icon.is_file() else QIcon()
+        if icon.isNull():
+            icon = QIcon.fromTheme("utilities-terminal")
         if icon.isNull():
             pixmap = QtGui.QPixmap(64, 64)
             pixmap.fill(QColor(BG))
             icon = QIcon(pixmap)
+
+        self.app.setWindowIcon(icon)
 
         self.tray = QtWidgets.QSystemTrayIcon(self.app)
         self.tray.setIcon(icon)

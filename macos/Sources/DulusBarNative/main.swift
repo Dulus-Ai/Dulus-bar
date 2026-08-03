@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        configureBranding()
         panelController = PanelController(model: model)
 
         let url = Self.webSocketURL()
@@ -25,6 +26,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         parentTimer?.invalidate()
         webSocket?.stop()
+    }
+
+    private func configureBranding() {
+        guard let url = Bundle.module.url(
+            forResource: "dulus-bird",
+            withExtension: "png"
+        ), let image = NSImage(contentsOf: url) else { return }
+
+        image.isTemplate = false
+        NSApp.applicationIconImage = image
     }
 
     private static func webSocketURL() -> URL {

@@ -49,3 +49,6 @@ Repository = "https://bitbucket.org/dulus-ai/dulus-bar"
 [tool.setuptools.packages.find]
 include = ["dulus_bar*"]
 exclude = ["wrappers*", "assets*", "dist*", "build*"]
+
+[tool.setuptools.package-data]
+dulus_bar = ["assets/*.png"]

@@ -11,7 +11,10 @@ let package = Package(
         .executable(name: "DulusBarNative", targets: ["DulusBarNative"])
     ],
     targets: [
-        .executableTarget(name: "DulusBarNative"),
+        .executableTarget(
+            name: "DulusBarNative",
+            resources: [.process("Resources")]
+        ),
         .testTarget(
             name: "DulusBarNativeTests",
             dependencies: ["DulusBarNative"]

@@ -38,6 +38,11 @@ struct IslandView: View {
         VStack(spacing: 10) {
             if let session = model.foremost {
                 HStack(spacing: 10) {
+                    Image("dulus-bird", bundle: .module)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .accessibilityHidden(true)
                     statusOrb(session.status)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
