@@ -423,7 +423,18 @@ class DulusBarOverlay(QMainWindow):
         self.pill.setGraphicsEffect(shadow)
 
     def _build_toast(self) -> None:
-        self.toast = QWidget(self)
+        # Top-level window, NOT a child of the island. A child is clipped to the
+        # tiny island window and never shows — which is why Allow/Deny was
+        # invisible. As its own frameless, always-on-top window the permission
+        # prompt floats below the pill anywhere on screen.
+        self.toast = QWidget(None)
+        self.toast.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.toast.setObjectName("toast")
         self.toast.setStyleSheet(
             f"#toast {{ background-color: {BG_HOVER}; border: 1px solid {BORDER_HOVER}; border-radius: 16px; }}"
