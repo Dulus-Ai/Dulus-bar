@@ -70,6 +70,7 @@ class AgentEventServer:
 
     async def _handle(self, websocket: Any) -> None:
         self._clients.add(websocket)
+        owned: set = set()  # (agent, session_id) pairs announced on this socket
         try:
             async for raw in websocket:
                 try:
@@ -97,6 +98,7 @@ class AgentEventServer:
                     session_id=data.get("session_id", "default"),
                     payload=data.get("payload", {}) or {},
                 )
+                owned.add((event.agent, event.session_id))
                 self._emit(event)
                 await self._relay(data, exclude=websocket)
         except websockets.exceptions.ConnectionClosed:
@@ -107,6 +109,17 @@ class AgentEventServer:
             print(f"[event_server] client error: {exc}")
         finally:
             self._clients.discard(websocket)
+            # Socket dropped (agent closed / crashed) — tell every UI that the
+            # sessions it owned are gone, so a close+reopen doesn't leave a ghost
+            # session lingering in the island for up to the prune window.
+            for ag, sid in owned:
+                self._emit(AgentEvent(agent=ag, event_type="disconnected", session_id=sid))
+                try:
+                    await self._relay(
+                        {"agent": ag, "type": "disconnected", "session_id": sid, "payload": {}}
+                    )
+                except Exception:
+                    pass
 
     async def _run(self) -> None:
         self._stop_event = asyncio.Event()

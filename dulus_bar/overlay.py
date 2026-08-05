@@ -338,6 +338,7 @@ class DulusBarOverlay(QMainWindow):
         self.revealed = not self._autohide  # tucked to a peek until hovered
         self.permission_pinned = False      # stay revealed while a prompt is open
         self._reveal_until = 0.0            # monotonic deadline for a brief peek
+        self._expand_grace = 0.0            # keep the panel open briefly after a manual expand
 
         self._init_window()
         self._init_ui()
@@ -604,6 +605,13 @@ class DulusBarOverlay(QMainWindow):
         now = datetime.now()
         payload = event.payload or {}
 
+        if event.event_type == "disconnected":
+            # The wrapper's socket dropped — remove its session right away so a
+            # close+reopen doesn't leave a duplicate ghost in the list.
+            if self.sessions.pop(key, None) is not None:
+                self._refresh_ui()
+            return
+
         if event.event_type == "session_started":
             self.sessions[key] = Session(
                 agent=event.agent,
@@ -760,6 +768,8 @@ class DulusBarOverlay(QMainWindow):
         self.expanded = not self.expanded
         self.panel.setVisible(self.expanded)
         if self.expanded:
+            # Brief grace so a quick cursor drift doesn't collapse it instantly.
+            self._expand_grace = time.monotonic() + 1.0
             self._rebuild_rows()
         self._apply_geometry()
         self._refresh_ui()
@@ -830,12 +840,26 @@ class DulusBarOverlay(QMainWindow):
         return self.revealed and self.geometry().contains(pos)
 
     def _poll_cursor(self) -> None:
+        # Move / click away from the island collapses the expanded ACTIVE AGENTS
+        # panel (dismiss-on-outside). Runs even without notch auto-hide; the
+        # permission toast is deliberately left untouched (needs Allow/Deny).
+        if self.expanded and not self._cursor_near():
+            self._collapse_if_away()
         if not self._autohide:
             return
         if self._cursor_near():
             self._reveal()
         else:
             self._maybe_tuck()
+
+    def _collapse_if_away(self) -> None:
+        if not self.expanded or self.toast_visible:
+            return
+        if time.monotonic() < self._expand_grace:  # honour the just-expanded grace
+            return
+        self.expanded = False
+        self.panel.setVisible(False)
+        self._apply_geometry()
 
     def _reveal(self, *, brief: bool = False, pin: bool = False) -> None:
         if pin:

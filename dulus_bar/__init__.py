@@ -3,4 +3,4 @@
 Free, native, no subscription. Windows / macOS (notch-aware) / Linux.
 """
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
