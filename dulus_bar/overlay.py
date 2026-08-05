@@ -472,26 +472,41 @@ class DulusBarOverlay(QMainWindow):
             | Qt.WindowType.Tool
             | Qt.WindowType.NoDropShadowWindowHint
         )
+        # The WINDOW is translucent ONLY so the corners round off and the shadow
+        # can bleed. The solid bubble is an inner "card" child — a translucent
+        # top-level's OWN stylesheet fill is unreliable (Qt skips it, leaving the
+        # text floating on whatever's behind → invisible on a light/white
+        # desktop). A normal child widget with WA_StyledBackground ALWAYS paints
+        # its background — the same approach the expanded panel uses.
         self.toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.toast.setObjectName("toast")
-        self.toast.setStyleSheet(
-            f"#toast {{ background-color: {BG_HOVER}; border: 1px solid {BORDER_HOVER}; border-radius: 16px; }}"
-        )
-        self.toast.setFixedSize(360, 104)
+        self.toast.setFixedSize(388, 132)
         self.toast.setVisible(False)
-        t = QVBoxLayout(self.toast)
-        t.setContentsMargins(14, 10, 14, 10)
+
+        outer = QVBoxLayout(self.toast)
+        outer.setContentsMargins(14, 8, 14, 16)  # breathing room for the shadow
+
+        card = QWidget(self.toast)
+        card.setObjectName("toastcard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"#toastcard {{ background-color: {PILL_BG}; border: 1px solid {PILL_BORDER};"
+            f" border-radius: 18px; }}"
+        )
+        outer.addWidget(card)
+
+        t = QVBoxLayout(card)
+        t.setContentsMargins(16, 12, 16, 12)
         t.setSpacing(6)
 
         self.toast_title = QLabel("Permission request")
         self.toast_title.setFont(QFont(FONT_FAMILY, 11))
         self.toast_title.setTextFormat(Qt.TextFormat.RichText)
-        self.toast_title.setStyleSheet(f"color: {TEXT};")
+        self.toast_title.setStyleSheet(f"color: {TEXT}; background: transparent;")
         t.addWidget(self.toast_title)
 
         self.toast_body = QLabel("")
         self.toast_body.setFont(QFont(FONT_FAMILY, 9))
-        self.toast_body.setStyleSheet(f"color: {TEXT_DIM};")
+        self.toast_body.setStyleSheet(f"color: {TEXT_DIM}; background: transparent;")
         self.toast_body.setWordWrap(True)
         t.addWidget(self.toast_body)
 
@@ -511,11 +526,11 @@ class DulusBarOverlay(QMainWindow):
         self.deny_btn.clicked.connect(lambda: self._resolve_permission(False))
         self.allow_btn.clicked.connect(lambda: self._resolve_permission(True))
 
-        toast_shadow = QGraphicsDropShadowEffect(self.toast)
-        toast_shadow.setBlurRadius(28)
-        toast_shadow.setColor(QColor(0, 0, 0, 190))
-        toast_shadow.setOffset(0, 8)
-        self.toast.setGraphicsEffect(toast_shadow)
+        toast_shadow = QGraphicsDropShadowEffect(card)
+        toast_shadow.setBlurRadius(24)
+        toast_shadow.setColor(QColor(0, 0, 0, 200))
+        toast_shadow.setOffset(0, 6)
+        card.setGraphicsEffect(toast_shadow)
 
     def _init_refresh_timer(self) -> None:
         self.timer = QTimer(self)
