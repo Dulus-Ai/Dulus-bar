@@ -15,6 +15,11 @@
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-lightgrey">
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Dulus-Ai/Dulus-bar/main/assets/island.png" alt="Dulus Bar — the floating island with a live agent and an Allow/Deny prompt" width="78%">
+  <br><sub><em>Live model + context per agent, and Allow / Deny right on the island — no diving back into a terminal.</em></sub>
+</p>
+
 ---
 
 Dulus Bar puts a floating status island at the top of your screen that shows every
