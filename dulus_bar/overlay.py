@@ -944,8 +944,11 @@ class DulusBarOverlay(QMainWindow):
                 return
         native.jump_to_terminal(hint)
 
-    # --- launch agents (right-click menu) -------------------------------
-    def _show_context_menu(self) -> None:
+    # --- right-click menu (shared by the island AND the tray icon) ------
+    def _build_menu(self, tray: bool = False) -> QtWidgets.QMenu:
+        """The full right-click menu, built in ONE place so the island's menu and
+        the tray icon's menu are always identical. They used to be two separate
+        copies that drifted — the island's ended up missing entries."""
         menu = QtWidgets.QMenu()
         menu.setStyleSheet(
             f"QMenu {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER}; "
@@ -955,27 +958,73 @@ class DulusBarOverlay(QMainWindow):
             f"QMenu::separator {{ height: 1px; background: {BORDER}; margin: 6px 8px; }}"
         )
 
-        open_agent = menu.addAction("📂  Open agent…")
-        open_agent.triggered.connect(self._open_agent_dialog)
+        # Only the first entry differs: the tray offers "Show island"; the island
+        # (already visible) offers Collapse/Expand instead.
+        if tray:
+            show = menu.addAction("Show island")
+            if show is not None:
+                show.triggered.connect(self.show)
+        else:
+            toggle = menu.addAction("Collapse" if self.expanded else "Expand")
+            if toggle is not None:
+                toggle.triggered.connect(self._toggle_expand)
+        menu.addSeparator()
 
         if (self._repo_root() / "wrappers" / "dulus_wrapper.py").exists():
             open_dulus = menu.addAction("🦅  Open Dulus")
-            open_dulus.triggered.connect(self._open_dulus)
+            if open_dulus is not None:
+                open_dulus.triggered.connect(self._open_dulus)
 
-        installed = detect_installed()
-        if installed:
-            menu.addSeparator()
+        agent_menu = menu.addMenu("📂  Open agent…")
+        if agent_menu is not None:
+            agent_menu.setStyleSheet(menu.styleSheet())
+            installed = detect_installed()
             for st, exe in installed:
-                act = menu.addAction(f"{st.emoji}  Open {st.display}")
-                act.triggered.connect(lambda _=False, n=st.display, e=exe: self._launch_agent(n, [e]))
+                act = agent_menu.addAction(f"{st.emoji}  {st.display}")
+                if act is not None:
+                    act.triggered.connect(
+                        lambda _=False, n=st.display, e=exe: self._launch_agent(n, [e])
+                    )
+            if installed:
+                agent_menu.addSeparator()
+            choose = agent_menu.addAction("Choose any AI or executable…")
+            if choose is not None:
+                choose.triggered.connect(self._open_agent_dialog)
 
         menu.addSeparator()
-        toggle = menu.addAction("Collapse" if self.expanded else "Expand")
-        toggle.triggered.connect(self._toggle_expand)
-        quit_act = menu.addAction("Quit Dulus Bar")
-        quit_act.triggered.connect(QApplication.quit)
+        folder = menu.addAction("Open Dulus Bar folder")
+        if folder is not None:
+            folder.triggered.connect(self._open_project_folder)
+        open_docs = menu.addAction("Open docs")
+        if open_docs is not None:
+            open_docs.triggered.connect(lambda: webbrowser.open(DOCS_URL))
 
-        menu.exec(QtGui.QCursor.pos())
+        menu.addSeparator()
+        quit_act = menu.addAction("Quit Dulus Bar")
+        if quit_act is not None:
+            quit_act.triggered.connect(QApplication.quit)
+        return menu
+
+    def _show_context_menu(self) -> None:
+        # Keep a ref so the menu isn't garbage-collected mid-exec.
+        self._menu = self._build_menu(tray=False)
+        self._menu.exec(QtGui.QCursor.pos())
+
+    def _open_project_folder(self) -> None:
+        root = str(self._repo_root())
+        try:
+            if sys.platform == "win32":
+                os.startfile(root)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+
+                subprocess.Popen(["open", root])
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", root])
+        except Exception:
+            pass
 
     def _repo_root(self) -> Path:
         return Path(__file__).resolve().parent.parent
@@ -1074,56 +1123,10 @@ class TrayApp:
         self.tray.activated.connect(self._on_tray_click)
 
         ov = self.overlay
-        menu = QtWidgets.QMenu()
-        menu.setStyleSheet(
-            f"QMenu {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER}; "
-            f"border-radius: 10px; padding: 6px; font-size: 12px; }}"
-            f"QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}"
-            f"QMenu::item:selected {{ background: {BG_HOVER}; }}"
-            f"QMenu::separator {{ height: 1px; background: {BORDER}; margin: 6px 8px; }}"
-        )
-
-        show_action = menu.addAction("Show island")
-        if show_action is not None:
-            show_action.triggered.connect(ov.show)
-
-        # Open Dulus — only if the wrapper ships alongside (matches macOS menu).
-        if (ov._repo_root() / "wrappers" / "dulus_wrapper.py").exists():
-            open_dulus = menu.addAction("🦅  Open Dulus")
-            if open_dulus is not None:
-                open_dulus.triggered.connect(ov._open_dulus)
-
-        # Open agent… — submenu of detected agents + "choose any", like macOS.
-        agent_menu = menu.addMenu("Open agent…")
-        if agent_menu is not None:
-            agent_menu.setStyleSheet(menu.styleSheet())
-            installed = detect_installed()
-            for st, exe in installed:
-                act = agent_menu.addAction(f"{st.emoji}  {st.display}")
-                if act is not None:
-                    act.triggered.connect(
-                        lambda _=False, n=st.display, e=exe: ov._launch_agent(n, [e])
-                    )
-            if installed:
-                agent_menu.addSeparator()
-            choose = agent_menu.addAction("Choose any AI or executable…")
-            if choose is not None:
-                choose.triggered.connect(ov._open_agent_dialog)
-
-        folder = menu.addAction("Open Dulus Bar folder")
-        if folder is not None:
-            folder.triggered.connect(self._open_project_folder)
-
-        open_docs = menu.addAction("Open docs")
-        if open_docs is not None:
-            open_docs.triggered.connect(lambda: webbrowser.open(DOCS_URL))
-
-        menu.addSeparator()
-        quit_action = menu.addAction("Quit Dulus Bar")
-        if quit_action is not None:
-            quit_action.triggered.connect(self.app.quit)
-
-        self.tray.setContextMenu(menu)
+        # ONE menu definition, shared with the island's right-click
+        # (DulusBarOverlay._build_menu) so the two never drift apart again.
+        self._tray_menu = ov._build_menu(tray=True)
+        self.tray.setContextMenu(self._tray_menu)
         self.tray.show()
 
     def _open_project_folder(self) -> None:
