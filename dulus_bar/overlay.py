@@ -970,7 +970,7 @@ class DulusBarOverlay(QMainWindow):
                 toggle.triggered.connect(self._toggle_expand)
         menu.addSeparator()
 
-        if (self._repo_root() / "wrappers" / "dulus_wrapper.py").exists():
+        if (self._wrappers_dir() / "dulus_wrapper.py").exists():
             open_dulus = menu.addAction("🦅  Open Dulus")
             if open_dulus is not None:
                 open_dulus.triggered.connect(self._open_dulus)
@@ -1029,6 +1029,17 @@ class DulusBarOverlay(QMainWindow):
     def _repo_root(self) -> Path:
         return Path(__file__).resolve().parent.parent
 
+    def _wrappers_dir(self) -> Path:
+        """Where the agent wrappers live: packaged inside dulus_bar for pip
+        installs, with a fallback to the old repo-root layout for source
+        checkouts. They used to sit at the repo root and were excluded from the
+        wheel, so a pip-installed island launched ``python <missing>`` and the
+        terminal closed instantly."""
+        packaged = Path(__file__).resolve().parent / "wrappers"
+        if (packaged / "agent_wrapper.py").exists():
+            return packaged
+        return self._repo_root() / "wrappers"
+
     def _python_console(self) -> str:
         """A python with a real console (not pythonw, which has no stdin)."""
         exe = sys.executable or "python"
@@ -1043,7 +1054,7 @@ class DulusBarOverlay(QMainWindow):
 
     def _launch_agent(self, display_name: str, command: List[str]) -> None:
         root = self._repo_root()
-        wrapper = root / "wrappers" / "agent_wrapper.py"
+        wrapper = self._wrappers_dir() / "agent_wrapper.py"
         argv = [self._python_console(), str(wrapper), display_name, *command]
         ok = native.open_terminal_running(argv, title=display_name, cwd=str(root))
         if not ok:
@@ -1055,7 +1066,7 @@ class DulusBarOverlay(QMainWindow):
 
     def _open_dulus(self) -> None:
         root = self._repo_root()
-        wrapper = root / "wrappers" / "dulus_wrapper.py"
+        wrapper = self._wrappers_dir() / "dulus_wrapper.py"
         argv = [self._python_console(), str(wrapper)]
         ok = native.open_terminal_running(argv, title="Dulus", cwd=str(root))
         if not ok:
