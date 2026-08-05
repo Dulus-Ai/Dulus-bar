@@ -126,26 +126,64 @@ def _ctx_color(ctx: str) -> str:
     return GOOD
 
 
-class PillButton(QPushButton):
-    """Rounded Allow/Deny button."""
+def _esc(text: str) -> str:
+    """Minimal HTML escape for the RichText toast title."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    def __init__(self, text: str, color: str, parent: Optional[QWidget] = None):
+
+def _elide(text: str, limit: int = 88) -> str:
+    """Collapse newlines/whitespace to a single line and truncate with an
+    ellipsis — keeps a long, minified tool call to one clean, readable row
+    instead of the messy multi-line wrap it used to become."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
+def _permission_call_text(tool: str, args: str) -> str:
+    """Build ONE clean representation of a tool call. Guards against a client
+    that stuffs (almost) the same string into both `tool` and `args` — so the
+    same call is never rendered twice."""
+    tool = (tool or "").strip()
+    args = (args or "").strip()
+    if not args:
+        return tool or "Run a tool?"
+    if not tool:
+        return args
+    if tool in args or args in tool:  # redundant → keep the fuller one
+        return args if len(args) >= len(tool) else tool
+    return f"{tool}  {args}"
+
+
+class PillButton(QPushButton):
+    """Rounded Allow/Deny button. `fg`/`border` let a button read as a light
+    primary (white fill, dark text) or a dark secondary (subtle fill, light
+    text, hairline border) — the same hierarchy as the macOS approval surface."""
+
+    def __init__(
+        self,
+        text: str,
+        color: str,
+        parent: Optional[QWidget] = None,
+        fg: str = "#08080a",
+        border: str = "",
+    ):
         super().__init__(text, parent)
-        self.setFixedHeight(26)
+        self.setFixedHeight(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        edge = f"1px solid {border}" if border else "none"
         self.setStyleSheet(
             f"""
             QPushButton {{
                 background-color: {color};
-                color: #08080a;
-                border: none;
-                border-radius: 13px;
-                padding: 0 16px;
+                color: {fg};
+                border: {edge};
+                border-radius: 14px;
+                padding: 0 18px;
                 font-family: "{FONT_FAMILY}";
                 font-weight: 700;
                 font-size: 11px;
             }}
-            QPushButton:hover {{ background-color: {color}; padding: 0 17px; }}
+            QPushButton:hover {{ background-color: {color}; padding: 0 19px; }}
             QPushButton:pressed {{ background-color: {color}; }}
             """
         )
@@ -439,14 +477,15 @@ class DulusBarOverlay(QMainWindow):
         self.toast.setStyleSheet(
             f"#toast {{ background-color: {BG_HOVER}; border: 1px solid {BORDER_HOVER}; border-radius: 16px; }}"
         )
-        self.toast.setFixedSize(340, 96)
+        self.toast.setFixedSize(360, 104)
         self.toast.setVisible(False)
         t = QVBoxLayout(self.toast)
         t.setContentsMargins(14, 10, 14, 10)
         t.setSpacing(6)
 
         self.toast_title = QLabel("Permission request")
-        self.toast_title.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.Bold))
+        self.toast_title.setFont(QFont(FONT_FAMILY, 11))
+        self.toast_title.setTextFormat(Qt.TextFormat.RichText)
         self.toast_title.setStyleSheet(f"color: {TEXT};")
         t.addWidget(self.toast_title)
 
@@ -456,11 +495,15 @@ class DulusBarOverlay(QMainWindow):
         self.toast_body.setWordWrap(True)
         t.addWidget(self.toast_body)
 
+        t.addStretch(1)  # pin the buttons to the bottom, whatever the body height
+
         btns = QHBoxLayout()
         btns.setSpacing(8)
         btns.addStretch()
-        self.deny_btn = PillButton("Deny", BAD)
-        self.allow_btn = PillButton("Allow", GOOD)
+        # macOS-style hierarchy: Allow is the light primary, Deny the dark
+        # secondary — calmer and clearer than the old red/green pair.
+        self.deny_btn = PillButton("Deny", "#2b2b33", fg=TEXT, border=BORDER_HOVER)
+        self.allow_btn = PillButton("Allow", "#f5f5f6", fg="#08080a")
         btns.addWidget(self.deny_btn)
         btns.addWidget(self.allow_btn)
         t.addLayout(btns)
@@ -622,13 +665,20 @@ class DulusBarOverlay(QMainWindow):
         event = self.pending_permissions[0]
         self.current_permission = event
         st = style_for(event.agent)
-        self.toast_title.setText(f"{st.emoji}  {st.display} needs approval")
         payload = event.payload or {}
-        body = payload.get("tool", "Run a tool?")
-        args = payload.get("args", "")
-        if args:
-            body += f"\n{args}"
-        self.toast_body.setText(body)
+        # Title mirrors the macOS surface: agent name + model, falling back to a
+        # faint "needs approval" when the model isn't known yet.
+        sess = self.sessions.get((event.agent, event.session_id))
+        model = (sess.model if sess else "") or payload.get("model", "")
+        tag = _esc(model) if model else "needs approval"
+        self.toast_title.setText(
+            f"{st.emoji}&nbsp; <b>{_esc(st.display)}</b>"
+            f"&nbsp;&nbsp;<span style='color:{TEXT_FAINT};'>{tag}</span>"
+        )
+        # ONE clean, elided line for the call — no duplicated text, no messy wrap.
+        self.toast_body.setText(
+            _elide(_permission_call_text(payload.get("tool", ""), payload.get("args", "")))
+        )
         self.toast.setVisible(True)
         self.toast.raise_()
         self.toast_visible = True
