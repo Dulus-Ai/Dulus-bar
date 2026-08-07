@@ -40,6 +40,13 @@ _AGENTS: List[AgentStyle] = [
     AgentStyle("aider", "Aider", "✎", "#22c55e", ("aider",)),
     AgentStyle("cline", "Cline", "◔", "#0ea5e9", ("cline", "roo")),
     AgentStyle("ollama", "Ollama", "◍", "#000000", ("ollama", "llama")),
+    AgentStyle("opencode", "OpenCode", "◈", "#f97316", ("opencode",)),
+    AgentStyle("goose", "Goose", "🪿", "#8b5cf6", ("goose", "block goose")),
+    AgentStyle("amp", "Amp", "⚡︎", "#ff2d20", ("amp", "sourcegraph")),
+    AgentStyle("crush", "Crush", "♥", "#ec4899", ("crush", "charm")),
+    AgentStyle("auggie", "Auggie", "Ⓐ", "#0d9488", ("auggie", "augment")),
+    AgentStyle("continue", "Continue", "▶", "#ffde59", ("continue", "cn")),
+    AgentStyle("plandex", "Plandex", "⌘", "#84cc16", ("plandex",)),
 ]
 
 _BY_ALIAS: Dict[str, AgentStyle] = {}
@@ -96,6 +103,14 @@ _LAUNCH_COMMANDS: Dict[str, Tuple[str, ...]] = {
     "grok": ("grok",),
     "copilot": ("copilot",),
     "opencode": ("opencode",),
+    "goose": ("goose",),
+    "amp": ("amp",),
+    "crush": ("crush",),
+    "auggie": ("auggie",),
+    "continue": ("cn", "continue"),
+    "plandex": ("plandex",),
+    "kimi": ("kimi",),
+    "mistral": ("mistral", "codestral"),
 }
 
 

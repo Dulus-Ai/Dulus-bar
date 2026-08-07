@@ -165,21 +165,40 @@ class MacOSBackend(NativeBackend):
 
     def open_terminal_running(self, command, title="", cwd=None) -> bool:
         import shlex
+        import tempfile
 
         parts = []
         if cwd:
             parts.append(f"cd {shlex.quote(str(cwd))}")
         parts.append(" ".join(shlex.quote(str(c)) for c in command))
         shell_cmd = " && ".join(parts)
+        # Write the command to a temp .sh and tell the terminal to run *that*.
+        # Inlining shell_cmd inside AppleScript double quotes breaks as soon as
+        # any path or argument contains a double quote or backslash — the
+        # terminal would open and immediately close, looking like "nothing
+        # started". A script file sidesteps AppleScript quoting entirely.
+        script_file = None
+        try:
+            fd, script_file = tempfile.mkstemp(prefix="dulus-bar-", suffix=".sh")
+            with os.fdopen(fd, "w") as f:
+                f.write("#!/bin/bash\n")
+                if title:
+                    f.write(f"echo -ne '\\033]0;{title}\\007'\n")
+                f.write(shell_cmd + "\n")
+            os.chmod(script_file, 0o755)
+        except Exception:
+            script_file = None
+
+        run_line = f"bash {shlex.quote(script_file)}" if script_file else shell_cmd
         # Prefer iTerm if present, else Terminal.
         script_iterm = (
             'tell application "iTerm"\n'
             ' create window with default profile\n'
-            f' tell current session of current window to write text "{shell_cmd}"\n'
+            f' tell current session of current window to write text "{run_line}"\n'
             ' activate\n'
             'end tell'
         )
-        script_term = f'tell application "Terminal" to do script "{shell_cmd}"\ntell application "Terminal" to activate'
+        script_term = f'tell application "Terminal" to do script "{run_line}"\ntell application "Terminal" to activate'
         for script in (script_term, script_iterm):
             try:
                 r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)

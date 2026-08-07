@@ -36,6 +36,19 @@ EVENT_SERVER = (
 )
 
 
+# CSI / OSC / single-char escape sequences — stripped before pattern matching
+# so PTY output (which is full of ANSI) still matches permission/done regexes.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"      # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[@-Z\\-_]"                  # 2-char escapes
+)
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
 class AgentWrapper:
     def __init__(self, agent_name: str, command: List[str], model: str = ""):
         self.agent_name = agent_name
@@ -58,6 +71,7 @@ class AgentWrapper:
         ]
         self._agent_stdin: Optional[asyncio.StreamWriter] = None
         self._pending_decision: Optional[bool] = None
+        self._pty_master: Optional[int] = None  # set when running under a PTY
 
     def make_event(self, event_type: str, payload: dict) -> dict:
         return {
@@ -153,6 +167,21 @@ class AgentWrapper:
     def _looks_like_done(self, buffer: str) -> bool:
         return any(p.search(buffer) for p in self.done_patterns)
 
+    async def _write_to_agent(self, data: bytes) -> None:
+        """Send bytes to the agent's stdin, whichever transport is active."""
+        if self._pty_master is not None:
+            try:
+                os.write(self._pty_master, data)
+            except OSError:
+                pass
+            return
+        if self._agent_stdin is not None:
+            self._agent_stdin.write(data)
+            try:
+                await self._agent_stdin.drain()
+            except Exception:
+                pass
+
     async def _listen_decisions(self, ws) -> None:
         """Listen for decisions from the island and inject them into the agent stdin."""
         try:
@@ -166,11 +195,10 @@ class AgentWrapper:
                 if data.get("session_id") != self.session_id:
                     continue
                 approved = data.get("payload", {}).get("approved", False)
-                if self._agent_stdin is None:
+                if self._agent_stdin is None and self._pty_master is None:
                     continue
                 answer = "Y\n" if approved else "n\n"
-                self._agent_stdin.write(answer.encode())
-                await self._agent_stdin.drain()
+                await self._write_to_agent(answer.encode())
                 await self._send(ws, "tool_approved" if approved else "tool_denied", {"approved": approved})
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -179,6 +207,185 @@ class AgentWrapper:
         if not self.command:
             print("[dulus-bar] no command provided", file=sys.stderr)
             return 1
+        # Interactive CLIs (claude, grok, gemini, codex…) refuse to boot their
+        # UI without a real TTY — under plain pipes they just sit there or exit.
+        # On POSIX with a terminal attached, run the agent under a PTY so it
+        # behaves exactly as if the user had launched it directly.
+        if os.name == "posix" and sys.stdin.isatty():
+            return await self._run_pty()
+        return await self._run_pipes()
+
+    async def _run_pty(self) -> int:
+        """Spawn the agent under a pseudo-terminal (POSIX).
+
+        The wrapper puts its own stdin in raw mode and bridges:
+          user keys  -> pty master  (arrows, ctrl-c, tab completion all work)
+          pty master -> user stdout + island feed (ANSI-stripped for matching)
+        """
+        import fcntl
+        import pty
+        import struct
+        import termios
+        import tty
+
+        master, slave = pty.openpty()
+        try:
+            size = shutil.get_terminal_size((80, 24))
+            fcntl.ioctl(
+                slave, termios.TIOCSWINSZ,
+                struct.pack("HHHH", size.lines, size.columns, 0, 0),
+            )
+        except Exception:
+            pass
+
+        env = os.environ.copy()
+        env["DULUS_BAR_SESSION_ID"] = self.session_id
+        env["VIBE_ISLAND_SESSION_ID"] = self.session_id  # back-compat
+        env.setdefault("TERM", "xterm-256color")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self.command,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=env,
+                preexec_fn=os.setsid,
+                close_fds=True,
+            )
+        except Exception as exc:
+            os.close(master)
+            os.close(slave)
+            print(f"[dulus-bar] failed to start {self.command}: {exc}", file=sys.stderr)
+            return 1
+        os.close(slave)
+        self._pty_master = master
+
+        ws = await self._connect_with_retry()
+        if ws is None:
+            print(
+                f"[dulus-bar] no pude conectar a {EVENT_SERVER}.\n"
+                "  Abre la barra primero:  dulusbar  (o ./dulusbar en mac/Linux, connect.cmd en Windows)",
+                file=sys.stderr,
+            )
+
+        loop = asyncio.get_running_loop()
+        out_q: "asyncio.Queue[bytes]" = asyncio.Queue()
+
+        def _on_master_readable() -> None:
+            try:
+                data = os.read(master, 65536)
+            except OSError:
+                data = b""  # EIO = agent side closed
+            out_q.put_nowait(data)
+
+        try:
+            os.set_blocking(master, False)
+        except Exception:
+            pass
+        try:
+            loop.add_reader(master, _on_master_readable)
+        except Exception:
+            os.close(master)
+            self._pty_master = None
+            print("[dulus-bar] PTY no soportado aquí; cayendo a pipes", file=sys.stderr)
+            return await self._run_pipes()
+
+        # Raw-mode keyboard bridge so interactive UIs get arrows/ctrl keys.
+        old_term = None
+        stdin_fd = sys.stdin.fileno()
+        try:
+            old_term = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        except Exception:
+            old_term = None
+
+        def _on_stdin_readable() -> None:
+            try:
+                data = os.read(stdin_fd, 4096)
+            except OSError:
+                data = b""
+            if data:
+                try:
+                    os.write(master, data)
+                except OSError:
+                    pass
+
+        try:
+            loop.add_reader(stdin_fd, _on_stdin_readable)
+        except Exception:
+            pass
+
+        rc = 1
+        try:
+            if ws is not None:
+                async with ws:
+                    await self._send(ws, "session_started", {
+                        "pid": process.pid,
+                        "terminal_hint": self.agent_name,
+                        **self._meta_payload(),
+                    })
+                    await asyncio.gather(
+                        self._pump_pty(out_q, ws),
+                        self._listen_decisions(ws),
+                    )
+            else:
+                await self._pump_pty(out_q, None)
+        except Exception as exc:
+            print(f"[dulus-bar] websocket error: {exc}", file=sys.stderr)
+        finally:
+            for fd in (stdin_fd, master):
+                try:
+                    loop.remove_reader(fd)
+                except Exception:
+                    pass
+            if old_term is not None:
+                try:
+                    termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term)
+                except Exception:
+                    pass
+            try:
+                os.close(master)
+            except OSError:
+                pass
+            self._pty_master = None
+        try:
+            rc = await process.wait()
+        except Exception:
+            pass
+        return rc
+
+    async def _pump_pty(self, out_q: "asyncio.Queue[bytes]", ws) -> None:
+        """Forward PTY output to the user's terminal and the island."""
+        buffer = ""
+        stdout = sys.stdout.buffer
+        while True:
+            chunk = await out_q.get()
+            if not chunk:
+                return
+            try:
+                stdout.write(chunk)
+                stdout.flush()
+            except Exception:
+                pass
+            if ws is None:
+                continue
+            clean = _strip_ansi(chunk.decode("utf-8", errors="replace"))
+            buffer = (buffer + clean)[-4000:]
+            self._scan_meta(buffer)
+            if self._looks_like_permission(buffer):
+                await self._send(ws, "tool_request", {"tool": buffer.strip()[-200:], "args": ""})
+                buffer = buffer[-500:]
+            elif self._looks_like_done(buffer):
+                await self._send(ws, "completed", {"text": "done"})
+                buffer = buffer[-500:]
+            elif "\n" in clean:
+                line = clean.rsplit("\n", 2)[-2]
+                if line.strip():
+                    await self._send(ws, "message", {"text": line.strip()[:100], **self._meta_payload()})
+
+    async def _run_pipes(self) -> int:
+        """Original pipe-based transport (Windows, or no TTY attached)."""
 
         # Resolve command on PATH if needed
         exe = self.command[0]
