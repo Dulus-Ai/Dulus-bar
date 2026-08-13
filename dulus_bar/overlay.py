@@ -994,10 +994,25 @@ class DulusBarOverlay(QMainWindow):
                 toggle.triggered.connect(self._toggle_expand)
         menu.addSeparator()
 
-        if (self._wrappers_dir() / "dulus_wrapper.py").exists():
-            open_dulus = menu.addAction("🦅  Open Dulus")
-            if open_dulus is not None:
-                open_dulus.triggered.connect(self._open_dulus)
+        bundled_dulus = self._find_bundled_dulus()
+        wrapper_exists = (self._wrappers_dir() / "dulus_wrapper.py").exists()
+        if bundled_dulus or wrapper_exists:
+            dulus_menu = menu.addMenu("🦅  Dulus")
+            if dulus_menu is not None:
+                dulus_menu.setStyleSheet(menu.styleSheet())
+                if bundled_dulus:
+                    gui_act = dulus_menu.addAction("Open Dulus GUI")
+                    if gui_act is not None:
+                        gui_act.triggered.connect(lambda _=False: self._open_bundled_dulus(terminal=False))
+                    term_act = dulus_menu.addAction("Open Dulus Terminal")
+                    if term_act is not None:
+                        term_act.triggered.connect(lambda _=False: self._open_bundled_dulus(terminal=True))
+                if wrapper_exists:
+                    if bundled_dulus:
+                        dulus_menu.addSeparator()
+                    wrapper_act = dulus_menu.addAction("Open Dulus (wrapper)")
+                    if wrapper_act is not None:
+                        wrapper_act.triggered.connect(self._open_dulus)
 
         agent_menu = menu.addMenu("📂  Open agent…")
         if agent_menu is not None:
@@ -1125,6 +1140,66 @@ class DulusBarOverlay(QMainWindow):
         else:
             command = [str(p)]
         self._launch_agent(name, command)
+
+    def _find_bundled_dulus(self) -> Optional[Path]:
+        """Return the path to a bundled Dulus binary/app next to Dulus Bar.
+
+        Layouts supported:
+          - Windows/Linux portable: DulusBar.exe / DulusBar next to Dulus.exe / Dulus
+          - macOS .app bundle: DulusBar.app next to Dulus.app in the same folder
+          - Dev/source run: Dulus Bar repo next to the Interant repo
+        """
+        exe = Path(sys.executable).resolve()
+        candidates: List[Path] = []
+        if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+            # PyInstaller / cx_Freeze / etc: binary dir
+            candidates += [
+                exe.parent / "Dulus.exe",              # Windows portable
+                exe.parent / "Dulus",                  # Linux portable
+                exe.parent.parent.parent / "Dulus.app",  # macOS app bundle neighbor
+            ]
+        # Source-run fallback: look next to the Dulus Bar repo
+        repo = self._repo_root()
+        candidates += [
+            repo.parent / "Dulus.app",
+            repo.parent / "Dulus.exe",
+            repo.parent / "Dulus",
+            repo.parent.parent / "Dulus.app",
+            repo.parent.parent / "Dulus.exe",
+            repo.parent.parent / "Dulus",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        return None
+
+    def _open_bundled_dulus(self, *, terminal: bool = False) -> None:
+        path = self._find_bundled_dulus()
+        if not path:
+            QtWidgets.QMessageBox.warning(self, "Dulus Bar", "Bundled Dulus executable not found.")
+            return
+        try:
+            if sys.platform == "darwin" and path.suffix == ".app":
+                if terminal:
+                    binary = path / "Contents" / "MacOS" / "Dulus"
+                    if binary.exists():
+                        native.open_terminal_running([str(binary), "--cli"], title="Dulus", cwd=str(path.parent))
+                    else:
+                        QtWidgets.QMessageBox.warning(self, "Dulus Bar", f"Dulus CLI binary not found inside {path}")
+                else:
+                    subprocess.Popen(["open", str(path)])
+            elif sys.platform == "win32":
+                if terminal:
+                    native.open_terminal_running([str(path), "--cli"], title="Dulus", cwd=str(path.parent))
+                else:
+                    subprocess.Popen([str(path)], creationflags=0x08000000)
+            else:
+                if terminal:
+                    native.open_terminal_running([str(path), "--cli"], title="Dulus", cwd=str(path.parent))
+                else:
+                    subprocess.Popen([str(path)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Dulus Bar", f"Could not open Dulus: {exc}")
 
     def closeEvent(self, a0: Optional[QtGui.QCloseEvent]) -> None:
         if a0 is not None:
