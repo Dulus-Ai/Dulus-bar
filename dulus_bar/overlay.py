@@ -1142,35 +1142,38 @@ class DulusBarOverlay(QMainWindow):
         self._launch_agent(name, command)
 
     def _find_bundled_dulus(self) -> Optional[Path]:
-        """Return the path to a bundled Dulus binary/app next to Dulus Bar.
+        """Return the path to a bundled Dulus binary/app next to or above Dulus Bar.
 
-        Layouts supported:
-          - Windows/Linux portable: DulusBar.exe / DulusBar next to Dulus.exe / Dulus
-          - macOS .app bundle: DulusBar.app next to Dulus.app in the same folder
-          - Dev/source run: Dulus Bar repo next to the Interant repo
+        Supported layouts:
+          - Windows/Linux: DulusBar next to Dulus.exe / Dulus
+          - macOS side-by-side: DulusBar.app next to Dulus.app
+          - macOS nested: DulusBar.app inside Dulus.app/Contents/Resources
+          - Dev/source: Dulus Bar repo next to the Interant repo
         """
         exe = Path(sys.executable).resolve()
-        candidates: List[Path] = []
-        if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
-            # PyInstaller / cx_Freeze / etc: binary dir
-            candidates += [
-                exe.parent / "Dulus.exe",              # Windows portable
-                exe.parent / "Dulus",                  # Linux portable
-                exe.parent.parent.parent / "Dulus.app",  # macOS app bundle neighbor
+        search_roots = [exe.parent]
+        current = exe.parent
+        for _ in range(7):
+            current = current.parent
+            search_roots.append(current)
+        for root in search_roots:
+            candidates = [
+                root / "Dulus.exe",
+                root / "Dulus",
+                root / "Dulus.app",
+                root / "Resources" / "Dulus.app",
+                root / "Contents" / "Resources" / "Dulus.app",
             ]
-        # Source-run fallback: look next to the Dulus Bar repo
+            for p in candidates:
+                if p.exists():
+                    return p
+        # Source-run fallback: look next to the Dulus Bar repo.
         repo = self._repo_root()
-        candidates += [
-            repo.parent / "Dulus.app",
-            repo.parent / "Dulus.exe",
-            repo.parent / "Dulus",
-            repo.parent.parent / "Dulus.app",
-            repo.parent.parent / "Dulus.exe",
-            repo.parent.parent / "Dulus",
-        ]
-        for p in candidates:
-            if p.exists():
-                return p
+        for root in (repo.parent, repo.parent.parent):
+            for name in ("Dulus.app", "Dulus.exe", "Dulus"):
+                p = root / name
+                if p.exists():
+                    return p
         return None
 
     def _open_bundled_dulus(self, *, terminal: bool = False) -> None:
