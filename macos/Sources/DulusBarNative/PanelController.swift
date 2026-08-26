@@ -13,6 +13,8 @@ final class PanelController {
     private let notch: NotchMetrics
     private var hoverTimer: Timer?
     private var wasInside = false
+    private var hoverEnterTime: Date?
+    private let dwellInterval: TimeInterval = 0.35 // 350ms dwell required before expanding
 
     init(model: IslandModel) {
         self.model = model
@@ -53,8 +55,7 @@ final class PanelController {
     }
 
     private func installMouseTracking() {
-        // Polling NSEvent.mouseLocation needs no Accessibility/Input Monitoring
-        // permission, unlike a global event tap. 20 Hz feels immediate and is tiny.
+        // Polling NSEvent.mouseLocation at 20 Hz without needing accessibility perms
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateHover() }
         }
@@ -63,9 +64,15 @@ final class PanelController {
 
     private func updateHover() {
         let mouse = NSEvent.mouseLocation
-        // Include a forgiving shoulder around the real cutout so entering it
-        // feels effortless; when expanded, retain hover over the dropped bubble.
-        let notchHit = notch.frame.insetBy(dx: -16, dy: -7)
+        // Collapsed trigger zone: strictly the top 10 points (or physical notch cutout)
+        // without dipping downward into the browser tab bar.
+        let triggerHeight = min(notch.height, 10.0)
+        let notchHit = CGRect(
+            x: notch.screenFrame.midX - notch.width / 2,
+            y: notch.screenFrame.maxY - triggerHeight,
+            width: notch.width,
+            height: triggerHeight
+        )
         let visibleHeight: CGFloat = model.expanded ? (model.permission == nil ? 94 : 142) : notch.height
         let expandedHit = CGRect(
             x: notch.screenFrame.midX - 180,
@@ -73,7 +80,27 @@ final class PanelController {
             width: 360,
             height: visibleHeight + 16
         )
-        let inside = notchHit.contains(mouse) || (model.expanded && expandedHit.contains(mouse))
+
+        var inside = false
+        if model.expanded {
+            // Once expanded, keep open while mouse is hovering the expanded card or notch
+            inside = expandedHit.contains(mouse) || notchHit.contains(mouse)
+            hoverEnterTime = nil
+        } else {
+            // When collapsed, require continuous dwell inside the notch area
+            if notchHit.contains(mouse) {
+                if let entered = hoverEnterTime {
+                    if Date().timeIntervalSince(entered) >= dwellInterval {
+                        inside = true
+                    }
+                } else {
+                    hoverEnterTime = Date()
+                }
+            } else {
+                hoverEnterTime = nil
+            }
+        }
+
         if inside != wasInside {
             wasInside = inside
             model.hoverExpanded = inside

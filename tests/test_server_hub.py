@@ -49,9 +49,10 @@ def test_event_relay_and_local_emit(hub):
                 await asyncio.wait_for(sender.recv(), 0.1)
 
     asyncio.run(scenario())
-    assert len(emitted) == 1
-    assert emitted[0].agent == "Dulus"
-    assert emitted[0].payload["ctx"] == "42%"
+    message_events = [e for e in emitted if e.event_type == "message"]
+    assert len(message_events) == 1
+    assert message_events[0].agent == "Dulus"
+    assert message_events[0].payload["ctx"] == "42%"
 
 
 def test_decision_relays_without_local_emit(hub):

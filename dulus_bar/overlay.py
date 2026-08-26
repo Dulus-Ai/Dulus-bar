@@ -67,8 +67,9 @@ ROW_HEIGHT = 46
 # Disable with DULUS_BAR_NO_AUTOHIDE=1 to keep the classic always-visible pill.
 PEEK_WIDTH = 132
 PEEK_HEIGHT = 6
-HOT_ZONE_HEIGHT = 26   # px below the top edge that counts as "hovering the notch"
-HOT_ZONE_PAD = 52      # px of horizontal slack on each side of the island
+HOT_ZONE_HEIGHT = 10   # px below the top edge that counts as "hovering the notch"
+HOT_ZONE_PAD = 16      # px of horizontal slack on each side of the island
+HOVER_DWELL_MS = 350   # ms of intentional hover required before expanding
 BRIEF_REVEAL_MS = 2600  # how long agent activity peeks the island open
 
 STATUS_COLORS = {
@@ -339,6 +340,7 @@ class DulusBarOverlay(QMainWindow):
         self.permission_pinned = False      # stay revealed while a prompt is open
         self._reveal_until = 0.0            # monotonic deadline for a brief peek
         self._expand_grace = 0.0            # keep the panel open briefly after a manual expand
+        self._hover_entered_at = 0.0        # monotonic timestamp when cursor entered hot zone
 
         self._init_window()
         self._init_ui()
@@ -847,9 +849,15 @@ class DulusBarOverlay(QMainWindow):
             self._collapse_if_away()
         if not self._autohide:
             return
-        if self._cursor_near():
-            self._reveal()
+        near = self._cursor_near()
+        now = time.monotonic()
+        if near:
+            if self._hover_entered_at == 0.0:
+                self._hover_entered_at = now
+            if (now - self._hover_entered_at) >= (HOVER_DWELL_MS / 1000.0):
+                self._reveal()
         else:
+            self._hover_entered_at = 0.0
             self._maybe_tuck()
 
     def _collapse_if_away(self) -> None:

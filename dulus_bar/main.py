@@ -87,7 +87,23 @@ def _run() -> None:
         raise
 
 
+def _is_already_running(host: str = "127.0.0.1", port: int = 17372) -> bool:
+    """Check if a Dulus Bar WebSocket hub is already running."""
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except Exception:
+        return False
+
+
 def main():
+    # Single-instance guard: if Dulus Bar is already running, avoid opening duplicate overlays
+    if _is_already_running():
+        print("[dulusbar] Dulus Bar is already running (ws://127.0.0.1:17372 active).", file=sys.stderr)
+        return
+
     # Escape the terminal on first launch (unless already detached, or the user
     # forces a foreground run with DULUS_BAR_FOREGROUND=1 for debugging).
     if (

@@ -123,7 +123,9 @@ final class IslandModel: ObservableObject {
             session.message = payload["text"]?.string ?? payload["message"]?.string ?? session.message
         }
         sessions[key] = session
-        reveal(sticky: event.type == "tool_request")
+        if event.type == "tool_request" {
+            reveal(sticky: true)
+        }
     }
 
     func reveal(sticky: Bool = false) {
