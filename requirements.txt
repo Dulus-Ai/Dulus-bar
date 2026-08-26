@@ -1,5 +1,5 @@
 # Core (all platforms)
-PyQt6>=6.4.0
+PySide6>=6.4.0
 websockets>=12.0
 psutil>=5.9.0
 

@@ -17,10 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon
-from PyQt6.QtWidgets import (
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -192,7 +192,7 @@ class PillButton(QPushButton):
 class SessionRow(QWidget):
     """One agent row inside the expanded panel."""
 
-    clicked = pyqtSignal(Session)
+    clicked = Signal(Session)
 
     def __init__(self, session: Session, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -275,8 +275,8 @@ class SessionRow(QWidget):
 class IslandPill(QWidget):
     """Collapsed island pill that toggles the expanded panel."""
 
-    toggled = pyqtSignal()
-    rightClicked = pyqtSignal()
+    toggled = Signal()
+    rightClicked = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -315,8 +315,8 @@ class IslandPill(QWidget):
 class DulusBarOverlay(QMainWindow):
     """Top-center / notch-anchored floating island."""
 
-    event_received = pyqtSignal(AgentEvent)
-    permission_decision = pyqtSignal(str, str, bool)  # agent, session_id, approved
+    event_received = Signal(AgentEvent)
+    permission_decision = Signal(str, str, bool)  # agent, session_id, approved
 
     def __init__(self, server: AgentEventServer):
         super().__init__()
