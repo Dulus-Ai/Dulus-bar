@@ -579,6 +579,13 @@ class DulusBarOverlay(QMainWindow):
             if os.environ.get("DULUS_BAR_AUTO_EXPAND") and not self.expanded:
                 QTimer.singleShot(900, self._toggle_expand)
         self._reposition()
+        # Linux/X11 fix: many window managers (GNOME/KDE/...) apply their own
+        # placement policy when a frameless Tool window is first mapped and
+        # silently ignore the pre-map move(), dropping the island in the screen
+        # centre instead of the top edge. Re-assert our position *after* the WM
+        # has finished mapping so it snaps back up top. Harmless on Win/macOS.
+        QTimer.singleShot(0, self._reposition)
+        QTimer.singleShot(60, self._reposition)
 
     # --- server plumbing ------------------------------------------------
     def _on_agent_event(self, event: AgentEvent) -> None:
