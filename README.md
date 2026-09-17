@@ -169,8 +169,28 @@ Output lands in `dist/` — `DulusBar.exe` on Windows, `DulusBar.app` on macOS
   reveal-on-hover.
 - **macOS** — notch hugging + always-visible via `pyobjc`. Without it, still runs
   as a plain top-most island.
-- **Linux** — X11 window focus via `wmctrl`/`xdotool`; on Wayland the island shows
-  and stays on top, jump-to-terminal is best-effort.
+- **Linux** — anchors to the top of the *work area* (never under a panel/dock)
+  and takes itself out of the window manager's placement policy on X11, so it
+  stays at the top instead of being re-centred. On Wayland it runs through
+  XWayland, because a Wayland client cannot position its own window. Agents open
+  in your real terminal: `gnome-terminal`, `ptyxis`, `kgx`, `konsole`,
+  `xfce4-terminal`, `tilix`, `terminator`, `lxterminal`, `alacritty`, `kitty`,
+  `foot`, `wezterm`, `ghostty`, `qterminal`, `urxvt`, `st` and `xterm` are each
+  launched with the flags they actually support, and `$TERMINAL` wins if set.
+  Install `wmctrl` or `xdotool` for click-to-focus on X11. Without a system tray
+  (stock GNOME) the island stays visible instead of hiding — right-click it for
+  the menu.
+
+### Linux knobs
+
+| Variable | Effect |
+| --- | --- |
+| `DULUS_BAR_X11_WM=1` | Let the window manager manage/place the island again. |
+| `DULUS_BAR_KEEP_WAYLAND=1` | Stay on native Wayland (the compositor decides where the island goes). |
+| `DULUS_BAR_FULL_SCREEN_EDGE=1` | Anchor to the physical screen edge, ignoring panels/docks. |
+| `DULUS_BAR_OPAQUE=1` | Drop translucency + shadows for window managers with no compositor. |
+| `DULUS_BAR_NO_AUTOHIDE=1` | Keep the island always visible (no reveal-on-hover). |
+| `DULUS_BAR_FOREGROUND=1` | Run in the foreground and keep the logs in the terminal. |
 
 ---
 

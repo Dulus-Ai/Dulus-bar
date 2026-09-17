@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Dulus Bar
+GenericName=AI agent island
+Comment=Floating status island for your AI coding agents
+Exec=dulusbar
+Icon=dulusbar
+Terminal=false
+Categories=Development;Utility;
+Keywords=ai;agents;island;overlay;claude;codex;gemini;
+StartupNotify=false
