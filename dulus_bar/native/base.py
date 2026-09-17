@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -128,3 +128,36 @@ class NativeBackend:
 
     def default_font_family(self) -> str:
         return "sans-serif"
+
+    def prepare_environment(self) -> None:
+        """Adjust process env *before* the Qt application exists.
+
+        Deliberately Qt-free so it can run at the very top of startup, where
+        platform knobs such as the Qt platform plugin must still be settable.
+        """
+        return None
+
+    def overlay_use_available_geometry(self) -> bool:
+        """Anchor the island inside the work area instead of the raw screen.
+
+        True on desktops that reserve screen edges for panels/docks, so the
+        island doesn't end up hidden underneath a top bar.
+        """
+        return False
+
+    def overlay_extra_window_flags(self) -> Tuple[str, ...]:
+        """Extra ``Qt.WindowType`` member *names* to OR into the overlay flags.
+
+        Names (not Qt objects) keep this module import-safe without Qt; unknown
+        names are ignored by the caller.
+        """
+        return ()
+
+    def overlay_settle_delays_ms(self) -> Tuple[int, ...]:
+        """Delays at which the overlay re-asserts its position after mapping.
+
+        Window managers routinely apply their own placement policy to a
+        frameless window when it is first mapped or resized, so the overlay
+        re-states where it belongs a few times while things settle.
+        """
+        return (0, 60)

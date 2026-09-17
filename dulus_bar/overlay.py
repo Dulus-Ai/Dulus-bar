@@ -9,6 +9,7 @@ and — for Dulus specifically — surfaces the active model and context usage.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -71,6 +72,7 @@ HOT_ZONE_HEIGHT = 10   # px below the top edge that counts as "hovering the notc
 HOT_ZONE_PAD = 16      # px of horizontal slack on each side of the island
 HOVER_DWELL_MS = 350   # ms of intentional hover required before expanding
 BRIEF_REVEAL_MS = 2600  # how long agent activity peeks the island open
+TOP_MARGIN = 8         # gap between the screen/work-area top and the pill
 
 STATUS_COLORS = {
     "running": GOOD,
@@ -336,36 +338,60 @@ class DulusBarOverlay(QMainWindow):
         # Notch-style auto-hide. On by default (Windows/Linux Qt overlay); the
         # native macOS surface handles its own notch behaviour separately.
         self._autohide = os.environ.get("DULUS_BAR_NO_AUTOHIDE") not in ("1", "true", "True")
+        if self._autohide and not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            # No status area (plain GNOME, bare WMs…): the tray menu is not a way
+            # back, so tucking the island out of sight could strand the user.
+            self._autohide = False
         self.revealed = not self._autohide  # tucked to a peek until hovered
         self.permission_pinned = False      # stay revealed while a prompt is open
         self._reveal_until = 0.0            # monotonic deadline for a brief peek
         self._expand_grace = 0.0            # keep the panel open briefly after a manual expand
         self._hover_entered_at = 0.0        # monotonic timestamp when cursor entered hot zone
 
+        # Placement policy comes from the platform backend: Linux anchors inside
+        # the work area (panels/docks) and needs the position re-asserted after
+        # the window manager has had its say.
+        self._use_available_geometry = native.overlay_use_available_geometry()
+        self._settle_delays = native.overlay_settle_delays_ms()
+        self._size: Optional[tuple] = None
+        # Escape hatch for window managers without a compositor (bare i3/openbox
+        # with no picom): a translucent window there paints solid black around
+        # the pill, so DULUS_BAR_OPAQUE=1 drops translucency and the shadows.
+        self._opaque = os.environ.get("DULUS_BAR_OPAQUE") in ("1", "true", "True")
+
         self._init_window()
         self._init_ui()
         self._reposition()
         self._init_refresh_timer()
         self._init_hover_timer()
-        if self._autohide:
-            self._apply_geometry()  # start tucked
+        self._apply_geometry()  # start tucked (or correctly sized when always-on)
 
     # --- setup ----------------------------------------------------------
-    def _init_window(self) -> None:
-        self.setWindowTitle(APP_NAME)
-        self.setWindowFlags(
+    def _overlay_flags(self) -> Qt.WindowType:
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
             | Qt.WindowType.NoDropShadowWindowHint
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Platform extras by name (e.g. X11BypassWindowManagerHint on Linux),
+        # ignoring anything this Qt build doesn't know about.
+        for name in native.overlay_extra_window_flags():
+            extra = getattr(Qt.WindowType, name, None)
+            if extra is not None:
+                flags |= extra
+        return flags
+
+    def _init_window(self) -> None:
+        self.setWindowTitle(APP_NAME)
+        self.setWindowFlags(self._overlay_flags())
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._opaque)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setFixedHeight(58)
 
     def _init_ui(self) -> None:
         central = QWidget()
-        central.setStyleSheet("background: transparent;")
+        central.setStyleSheet("background: transparent;" if not self._opaque else f"background: {BG};")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -461,7 +487,8 @@ class DulusBarOverlay(QMainWindow):
         shadow.setBlurRadius(34)
         shadow.setColor(QColor(0, 0, 0, 210))
         shadow.setOffset(0, 8)
-        self.pill.setGraphicsEffect(shadow)
+        if not self._opaque:
+            self.pill.setGraphicsEffect(shadow)
 
     def _build_toast(self) -> None:
         # Top-level window, NOT a child of the island. A child is clipped to the
@@ -469,19 +496,14 @@ class DulusBarOverlay(QMainWindow):
         # invisible. As its own frameless, always-on-top window the permission
         # prompt floats below the pill anywhere on screen.
         self.toast = QWidget(None)
-        self.toast.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.NoDropShadowWindowHint
-        )
+        self.toast.setWindowFlags(self._overlay_flags())
         # The WINDOW is translucent ONLY so the corners round off and the shadow
         # can bleed. The solid bubble is an inner "card" child — a translucent
         # top-level's OWN stylesheet fill is unreliable (Qt skips it, leaving the
         # text floating on whatever's behind → invisible on a light/white
         # desktop). A normal child widget with WA_StyledBackground ALWAYS paints
         # its background — the same approach the expanded panel uses.
-        self.toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._opaque)
         self.toast.setFixedSize(388, 132)
         self.toast.setVisible(False)
 
@@ -533,7 +555,8 @@ class DulusBarOverlay(QMainWindow):
         toast_shadow.setBlurRadius(24)
         toast_shadow.setColor(QColor(0, 0, 0, 200))
         toast_shadow.setOffset(0, 6)
-        card.setGraphicsEffect(toast_shadow)
+        if not self._opaque:
+            card.setGraphicsEffect(toast_shadow)
 
     def _init_refresh_timer(self) -> None:
         self.timer = QTimer(self)
@@ -541,28 +564,47 @@ class DulusBarOverlay(QMainWindow):
         self.timer.start(1000)
 
     # --- positioning (notch-aware) --------------------------------------
-    def _reposition(self) -> None:
+    def _screen_rect(self) -> QtCore.QRect:
+        """Rect the island anchors to: the work area where the platform asks
+        for it (Linux panels/docks), the raw screen otherwise."""
         screen = QApplication.primaryScreen()
         if screen is None:
-            return
-        geo = screen.geometry()
+            return QtCore.QRect(0, 0, 1920, 1080)
+        return screen.availableGeometry() if self._use_available_geometry else screen.geometry()
+
+    def _reposition(self) -> None:
+        rect = self._screen_rect()
         width = self.width()
-        x = geo.x() + (geo.width() - width) // 2
+        x = rect.x() + (rect.width() - width) // 2
 
         if self._autohide and not self.revealed:
             # Tucked: peek sits flush against the very top edge, like a notch nub.
-            y = geo.y()
-            self.move(x, y)
-            return
-
-        notch = native.notch_geometry()
-        if notch is not None:
-            # Qt fallback: hang directly under the camera cutout. The native
-            # Swift/AppKit surface is preferred on macOS for true integration.
-            y = geo.y() + max(0, notch.height - 4)
+            y = rect.y()
         else:
-            y = geo.y() + 8
-        self.move(x, y)
+            notch = native.notch_geometry()
+            if notch is not None:
+                # Qt fallback: hang directly under the camera cutout. The native
+                # Swift/AppKit surface is preferred on macOS for true integration.
+                y = rect.y() + max(0, notch.height - 4)
+            else:
+                y = rect.y() + TOP_MARGIN
+        # Only move when we're actually off target: the refresh timer calls this
+        # every second, and re-issuing the same move made X11 flicker. Comparing
+        # against the live position also means a WM that re-placed the window
+        # gets corrected on the very next tick.
+        if (self.x(), self.y()) != (x, y):
+            self.move(x, y)
+
+    def _settle_position(self) -> None:
+        """Re-assert the position while the WM finishes mapping/resizing us.
+
+        Linux/X11 window managers (GNOME/KDE/…) apply their own placement policy
+        to a frameless Tool window and silently ignore the pre-map move(),
+        dropping the island in the screen centre instead of the top edge — and
+        some of them do it a few hundred ms late. Harmless on Windows/macOS.
+        """
+        for delay in self._settle_delays:
+            QTimer.singleShot(delay, self._reposition)
 
     def showEvent(self, a0) -> None:  # noqa: ANN001
         super().showEvent(a0)
@@ -574,18 +616,10 @@ class DulusBarOverlay(QMainWindow):
             except Exception:
                 pass
             # Debug aid: auto-expand for screenshots (DULUS_BAR_AUTO_EXPAND=1).
-            import os
-
             if os.environ.get("DULUS_BAR_AUTO_EXPAND") and not self.expanded:
                 QTimer.singleShot(900, self._toggle_expand)
         self._reposition()
-        # Linux/X11 fix: many window managers (GNOME/KDE/...) apply their own
-        # placement policy when a frameless Tool window is first mapped and
-        # silently ignore the pre-map move(), dropping the island in the screen
-        # centre instead of the top edge. Re-assert our position *after* the WM
-        # has finished mapping so it snaps back up top. Harmless on Win/macOS.
-        QTimer.singleShot(0, self._reposition)
-        QTimer.singleShot(60, self._reposition)
+        self._settle_position()
 
     # --- server plumbing ------------------------------------------------
     def _on_agent_event(self, event: AgentEvent) -> None:
@@ -752,24 +786,30 @@ class DulusBarOverlay(QMainWindow):
             self.peek.setVisible(True)
             self.pill.setVisible(False)
             self.panel.setVisible(False)
-            self.setFixedHeight(PEEK_HEIGHT + 6)
-            self.setFixedWidth(PEEK_WIDTH + 8)
-            self._reposition()
-            self._position_toast()
-            return
-
-        # Revealed: full pill (optionally with the expanded panel).
-        self.peek.setVisible(False)
-        self.pill.setVisible(True)
-        if self.expanded:
-            ph = self._panel_height()
-            self.panel.setFixedHeight(ph)
-            # top(8) + pill(42) + gap(8) + panel + bottom shadow room(16)
-            self.setFixedHeight(8 + 42 + 8 + ph + 16)
-            self.setFixedWidth(360)
+            size = (PEEK_WIDTH + 8, PEEK_HEIGHT + 6)
         else:
-            self.setFixedHeight(58)
-            self.setFixedWidth(max(self.pill.minimumWidth(), self.pill.sizeHint().width() + 8))
+            # Revealed: full pill (optionally with the expanded panel).
+            self.peek.setVisible(False)
+            self.pill.setVisible(True)
+            if self.expanded:
+                ph = self._panel_height()
+                self.panel.setFixedHeight(ph)
+                # top(8) + pill(42) + gap(8) + panel + bottom shadow room(16)
+                size = (360, 8 + 42 + 8 + ph + 16)
+            else:
+                size = (
+                    max(self.pill.minimumWidth(), self.pill.sizeHint().width() + 8),
+                    58,
+                )
+
+        # Resize only on a real change. The refresh timer runs every second, and
+        # re-stating the same fixed size made the island flicker on X11 — worse,
+        # every resize is a fresh invitation for the WM to re-place us.
+        if size != self._size:
+            self._size = size
+            self.setFixedWidth(size[0])
+            self.setFixedHeight(size[1])
+            self._settle_position()
         self._reposition()
         self._position_toast()
 
@@ -835,11 +875,10 @@ class DulusBarOverlay(QMainWindow):
 
     def _hot_zone(self) -> QtCore.QRect:
         """Top-center strip that behaves like the macOS notch hover target."""
-        screen = QApplication.primaryScreen()
-        geo = screen.geometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
+        rect = self._screen_rect()
         w = max(self.width(), PEEK_WIDTH) + 2 * HOT_ZONE_PAD
-        x = geo.x() + (geo.width() - w) // 2
-        return QtCore.QRect(x, geo.y(), w, HOT_ZONE_HEIGHT)
+        x = rect.x() + (rect.width() - w) // 2
+        return QtCore.QRect(x, rect.y(), w, HOT_ZONE_HEIGHT)
 
     def _cursor_near(self) -> bool:
         pos = QtGui.QCursor.pos()
@@ -1070,12 +1109,8 @@ class DulusBarOverlay(QMainWindow):
             if sys.platform == "win32":
                 os.startfile(root)  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
-                import subprocess
-
                 subprocess.Popen(["open", root])
             else:
-                import subprocess
-
                 subprocess.Popen(["xdg-open", root])
         except Exception:
             pass
@@ -1129,12 +1164,20 @@ class DulusBarOverlay(QMainWindow):
             )
 
     def _open_agent_dialog(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        dialog = QtWidgets.QFileDialog(
             self,
             "Open agent",
             str(Path.home()),
             "Agents (*.py *.exe *.sh *.js *.mjs *.ts);;All files (*)",
         )
+        if sys.platform not in ("win32", "darwin"):
+            # GTK/portal file choosers regularly fail or hang when driven from a
+            # Qt app on Linux; Qt's own dialog always comes up.
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        if not dialog.exec():
+            return
+        selected = dialog.selectedFiles()
+        path = selected[0] if selected else ""
         if not path:
             return
         p = Path(path)
@@ -1172,14 +1215,17 @@ class DulusBarOverlay(QMainWindow):
             current = current.parent
             search_roots.append(current)
         for root in search_roots:
-            candidates = [
-                root / "Dulus.exe",
-                root / "Dulus",
+            for p in (root / "Dulus.exe", root / "Dulus"):
+                # Must be a real executable file: a *directory* called "Dulus"
+                # (the Interant checkout, typically) used to match and then fail
+                # to launch.
+                if p.is_file():
+                    return p
+            for p in (
                 root / "Dulus.app",
                 root / "Resources" / "Dulus.app",
                 root / "Contents" / "Resources" / "Dulus.app",
-            ]
-            for p in candidates:
+            ):
                 if p.exists():
                     return p
         # Source-run fallback: look next to the Dulus Bar repo.
@@ -1187,7 +1233,7 @@ class DulusBarOverlay(QMainWindow):
         for root in (repo.parent, repo.parent.parent):
             for name in ("Dulus.app", "Dulus.exe", "Dulus"):
                 p = root / name
-                if p.exists():
+                if p.is_file() or (p.suffix == ".app" and p.exists()):
                     return p
         return None
 
@@ -1195,6 +1241,11 @@ class DulusBarOverlay(QMainWindow):
         path = self._find_bundled_dulus()
         if not path:
             QtWidgets.QMessageBox.warning(self, "Dulus Bar", "Bundled Dulus executable not found.")
+            return
+        if sys.platform not in ("win32", "darwin") and path.is_file() and not os.access(path, os.X_OK):
+            QtWidgets.QMessageBox.warning(
+                self, "Dulus Bar", f"{path} is not executable.\nRun:  chmod +x {path}"
+            )
             return
         try:
             if sys.platform == "darwin" and path.suffix == ".app":
@@ -1245,6 +1296,16 @@ class TrayApp:
 
         self.app.setWindowIcon(icon)
 
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            # Common on stock GNOME and bare window managers. The island stays
+            # visible in that case (see DulusBarOverlay.__init__) and its own
+            # right-click menu is identical to the tray menu.
+            print(
+                "[dulusbar] no system tray on this desktop — right-click the island for the menu "
+                "(GNOME users: install the AppIndicator extension for a tray icon)."
+            )
+            return
+
         self.tray = QtWidgets.QSystemTrayIcon(self.app)
         self.tray.setIcon(icon)
         self.tray.setToolTip(APP_NAME)
@@ -1263,12 +1324,8 @@ class TrayApp:
             if sys.platform == "win32":
                 os.startfile(root)  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
-                import subprocess
-
                 subprocess.Popen(["open", root])
             else:
-                import subprocess
-
                 subprocess.Popen(["xdg-open", root])
         except Exception:
             pass
@@ -1283,9 +1340,15 @@ def run_overlay() -> None:
 
     global FONT_FAMILY
 
+    # Must happen before the QApplication exists: on Wayland this switches us to
+    # XWayland, the only way a client can pin itself to the top of the screen.
+    native.prepare_environment()
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName(APP_NAME)
+    # Lets Linux desktops match the window/tray to our .desktop entry & icon.
+    app.setDesktopFileName("dulusbar")
 
     FONT_FAMILY = native.default_font_family()
     app.setFont(QFont(FONT_FAMILY, 10))

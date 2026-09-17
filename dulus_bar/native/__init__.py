@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .base import NativeBackend, NotchGeometry, WindowInfo
 
@@ -35,6 +35,10 @@ __all__ = [
     "notch_geometry",
     "configure_always_visible",
     "default_font_family",
+    "prepare_environment",
+    "overlay_use_available_geometry",
+    "overlay_extra_window_flags",
+    "overlay_settle_delays_ms",
 ]
 
 
@@ -93,6 +97,23 @@ def configure_always_visible(win: object) -> None:
 
 def default_font_family() -> str:
     return get_backend().default_font_family()
+
+
+def prepare_environment() -> None:
+    """Platform env tweaks that must happen before the Qt app is created."""
+    get_backend().prepare_environment()
+
+
+def overlay_use_available_geometry() -> bool:
+    return get_backend().overlay_use_available_geometry()
+
+
+def overlay_extra_window_flags() -> Tuple[str, ...]:
+    return get_backend().overlay_extra_window_flags()
+
+
+def overlay_settle_delays_ms() -> Tuple[int, ...]:
+    return get_backend().overlay_settle_delays_ms()
 
 
 def list_windows() -> List[WindowInfo]:

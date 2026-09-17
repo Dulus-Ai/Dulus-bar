@@ -23,6 +23,10 @@ if errorlevel 1 (
 REM 3) PYTHONPATH so -m dulus_bar works even without pip install
 set "PYTHONPATH=%~dp0;%PYTHONPATH%"
 
+REM wrappers ship inside the package; fall back to the old repo-root layout
+set "WRAPPERS=%~dp0dulus_bar\wrappers"
+if not exist "%WRAPPERS%\dulus_wrapper.py" set "WRAPPERS=%~dp0wrappers"
+
 REM 4) start the bar from SOURCE (not stale exe)
 echo [1/3] Starting Dulus Bar...
 start "DulusBar" /MIN python -m dulus_bar
@@ -32,7 +36,7 @@ echo [2/3] Waiting for live websocket at 127.0.0.1:17372 ...
 set /a tries=0
 :wait_ws
 set /a tries+=1
-python "%~dp0wrappers\_ws_health.py" >nul 2>&1
+python "%WRAPPERS%\_ws_health.py" >nul 2>&1
 if not errorlevel 1 goto ws_ok
 if %tries% GEQ 40 goto ws_fail
 timeout /t 0 /nobreak >nul
@@ -49,7 +53,7 @@ echo [OK] Dulus Bar websocket ALIVE
 :launch_dulus
 echo [3/3] Launching Dulus wired to the bar...
 echo.
-python "%~dp0wrappers\dulus_wrapper.py" %*
+python "%WRAPPERS%\dulus_wrapper.py" %*
 set rc=%ERRORLEVEL%
 echo.
 echo Dulus exited with code %rc%

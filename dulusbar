@@ -16,6 +16,10 @@ export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || { echo "[dulusbar] $PY not found on PATH"; exit 1; }
 
+# Wrappers ship inside the package; fall back to the old repo-root layout.
+WRAPPERS="$ROOT/dulus_bar/wrappers"
+[[ -f "$WRAPPERS/dulus_wrapper.py" ]] || WRAPPERS="$ROOT/wrappers"
+
 ISLAND_ONLY=0
 DULUS_ONLY=0
 DULUS_PATH=""
@@ -29,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ws_alive() { "$PY" "$ROOT/wrappers/_ws_health.py" >/dev/null 2>&1; }
+ws_alive() { "$PY" "$WRAPPERS/_ws_health.py" >/dev/null 2>&1; }
 
 start_bar() {
   if ws_alive; then
@@ -44,7 +48,7 @@ start_bar() {
     sleep 0.2
     if ws_alive; then echo "[dulusbar] up, websocket ALIVE"; return; fi
   done
-  echo "[dulusbar] bar did not answer the websocket in time (check PyQt6 / display)."
+  echo "[dulusbar] bar did not answer the websocket in time (check PySide6 / display)."
 }
 
 if [[ "$DULUS_ONLY" -eq 0 ]]; then
@@ -55,7 +59,7 @@ if [[ "$ISLAND_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-CMD=("$PY" "$ROOT/wrappers/dulus_wrapper.py")
+CMD=("$PY" "$WRAPPERS/dulus_wrapper.py")
 if [[ -n "$DULUS_PATH" ]]; then
   CMD+=(--dulus "$DULUS_PATH")
 fi

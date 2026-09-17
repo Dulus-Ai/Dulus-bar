@@ -32,6 +32,10 @@ if (-not $py) {
 
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$Root;$env:PYTHONPATH" } else { $Root }
 
+# Wrappers ship inside the package; fall back to the old repo-root layout.
+$Wrappers = Join-Path $Root "dulus_bar\wrappers"
+if (-not (Test-Path (Join-Path $Wrappers "dulus_wrapper.py"))) { $Wrappers = Join-Path $Root "wrappers" }
+
 function Test-IslandTcp {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
@@ -45,7 +49,7 @@ function Test-IslandTcp {
 
 function Test-IslandWs {
     # Real websocket handshake — TCP open != server alive (stale exe bug)
-    $helper = Join-Path $Root "wrappers\_ws_health.py"
+    $helper = Join-Path $Wrappers "_ws_health.py"
     if (-not (Test-Path $helper)) { return (Test-IslandTcp) }
     & python $helper 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
@@ -101,7 +105,7 @@ function Resolve-Dulus {
         return $p
     }
 
-    $helper = Join-Path $Root "wrappers\_resolve_dulus.py"
+    $helper = Join-Path $Wrappers "_resolve_dulus.py"
     $out = & python $helper 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Could not resolve dulus.py"
@@ -126,7 +130,7 @@ if ($IslandOnly) {
 }
 
 $null = Resolve-Dulus
-$wrapper = Join-Path $Root "wrappers\dulus_wrapper.py"
+$wrapper = Join-Path $Wrappers "dulus_wrapper.py"
 $argList = New-Object System.Collections.Generic.List[string]
 $argList.Add($wrapper) | Out-Null
 if ($DulusPath) {
