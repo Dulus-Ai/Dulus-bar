@@ -7,13 +7,14 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+from . import protocol as P
 from .server import AgentEventServer
 
-WS_PORT = 17372
 _NATIVE_EXECUTABLE = "DulusBarNative"
 
 
@@ -33,6 +34,26 @@ def native_binary(root: Optional[Path] = None) -> Path:
 def native_available(root: Optional[Path] = None) -> bool:
     path = native_binary(root)
     return path.is_file() and os.access(path, os.X_OK)
+
+
+def _sources(root: Path) -> List[Path]:
+    package = root / "macos"
+    return [package / "Package.swift", *sorted((package / "Sources").rglob("*"))]
+
+
+def native_stale(root: Optional[Path] = None) -> bool:
+    """True when the built helper predates its sources (e.g. after git pull).
+
+    A stale helper speaks an older protocol, so it would sit there empty.
+    """
+    if os.environ.get("DULUS_BAR_NATIVE_BINARY"):
+        return False  # a binary the user pointed us at: their call
+    base = root or project_root()
+    binary = native_binary(base)
+    if not binary.is_file():
+        return False
+    built = binary.stat().st_mtime
+    return any(p.is_file() and p.stat().st_mtime > built for p in _sources(base))
 
 
 def build_native(root: Optional[Path] = None) -> Path:
@@ -66,19 +87,32 @@ def _terminate(process: subprocess.Popen) -> None:
 def run_native() -> int:
     """Own the WebSocket hub and run the native helper until it exits."""
     binary = native_binary()
-    if not native_available():
+    if not native_available() or native_stale():
         if os.environ.get("DULUS_BAR_NATIVE_AUTOBUILD", "1") == "0":
-            raise FileNotFoundError(f"native helper not built: {binary}")
-        print("[dulusbar] native helper missing; building release binary...")
+            state = "out of date" if native_available() else "not built"
+            raise FileNotFoundError(
+                f"native helper {state}: {binary} (swift build -c release --package-path macos)"
+            )
+        print("[dulusbar] building the native macOS island…")
         binary = build_native()
 
-    server = AgentEventServer(port=WS_PORT)
-    server.start()
-    process = subprocess.Popen(
-        [str(binary), "--websocket", f"ws://127.0.0.1:{WS_PORT}"],
-        cwd=project_root(),
-        env={**os.environ, "DULUS_BAR_PARENT_PID": str(os.getpid())},
-    )
+    port = P.configured_port()
+    server = AgentEventServer(port=port, publish=True)
+    if not server.start():
+        raise RuntimeError(f"the hub could not start on port {port}: {server.error}")
+    quit_requested = threading.Event()
+    server.on_shutdown(quit_requested.set)
+    try:
+        process = subprocess.Popen(
+            [str(binary), "--websocket", f"ws://{P.DEFAULT_HOST}:{port}"],
+            cwd=project_root(),
+            # The UI token travels in the environment, never on the command
+            # line where any local user could read it with `ps`.
+            env={**os.environ, "DULUS_BAR_PARENT_PID": str(os.getpid()), "DULUS_BAR_TOKEN": server.token},
+        )
+    except Exception:
+        server.stop()  # free the port for the Qt fallback
+        raise
 
     cleaned = False
 
@@ -101,11 +135,12 @@ def run_native() -> int:
         signal.signal(signum, handle_signal)
 
     try:
-        while True:
+        while not quit_requested.is_set():
             code = process.poll()
             if code is not None:
                 return code
             time.sleep(0.25)
+        return 0
     finally:
         cleanup()
         for signum, handler in previous_handlers.items():

@@ -2,14 +2,17 @@
 
 Usage:
     python base_wrapper.py "Agent Name" /path/to/agent-bin [agent args...]
+    dulusbar wrap "Agent Name" -- /path/to/agent-bin [agent args...]
 
 The wrapper:
   - Opens websocket to ws://127.0.0.1:17372.
-  - Spawns the real agent with piped stdio.
-  - Forwards your terminal input to the agent.
-  - Forwards agent output to your terminal.
+  - Spawns the real agent (under a PTY when there's a terminal, else pipes).
+  - Forwards your terminal input to the agent, and its output to your terminal.
   - Sends status/permission events to the island.
-  - Listens for Allow/Deny decisions from the island and injects them into the agent stdin.
+  - Listens for Allow/Deny decisions from the island and types them into the agent.
+
+One prompt is reported once: while it's pending nothing else is sent for it,
+and if you answer in the terminal instead, the island's card is withdrawn.
 
 Optional `model` / `ctx` metadata (surfaced by Dulus Bar for Dulus): pass a
 starting model to the constructor and/or populate `model_patterns` / `ctx_patterns`
@@ -22,6 +25,8 @@ import os
 import re
 import shutil
 import sys
+import threading
+import time
 import uuid
 from typing import List, Optional
 
@@ -32,8 +37,15 @@ import websockets
 EVENT_SERVER = (
     os.getenv("DULUS_BAR_SERVER")
     or os.getenv("VIBE_ISLAND_SERVER")
-    or "ws://127.0.0.1:17372"
+    or f"ws://127.0.0.1:{os.getenv('DULUS_BAR_PORT') or 17372}"
 )
+
+# Status lines are coalesced to at most one event per interval: TUIs redraw
+# constantly and every redraw used to become an event.
+MESSAGE_INTERVAL = 0.3
+# After a prompt is answered the TUI often redraws it once more before it
+# processes the key; don't mistake that echo for a new prompt.
+PROMPT_GRACE = 1.5
 
 
 # CSI / OSC / single-char escape sequences — stripped before pattern matching
@@ -47,6 +59,26 @@ _ANSI_RE = re.compile(
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+# Input the *terminal* sends on its own — focus in/out, mouse reports, replies
+# to cursor / device queries. It must not count as the user answering a prompt
+# (alt-tabbing away used to withdraw the island's card).
+_TERMINAL_INPUT_RE = re.compile(
+    rb"\x1b\[[IO]"                       # focus in / out
+    rb"|\x1b\[M[\s\S]{3}"                 # X10 mouse report
+    rb"|\x1b\[<[\d;]*[Mm]"                # SGR mouse report
+    rb"|\x1b\[\??[\d;]*[Rcn]"              # cursor position / device attributes / status
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC replies (colors, titles)
+)
+
+# Agents whose approval prompt is a select list: Enter takes the highlighted
+# "Yes", Esc is "No". (Typing "n" + Enter there would pick the default: allow.)
+_MENU_AGENTS = ("claude", "codex", "gemini", "qwen")
+
+
+def is_user_input(data: bytes) -> bool:
+    return bool(_TERMINAL_INPUT_RE.sub(b"", data))
 
 
 class AgentWrapper:
@@ -65,21 +97,47 @@ class AgentWrapper:
             re.compile(r"Do\s+you\s+want\s+to\s+allow\s+(.*?)\?", re.I | re.S),
             re.compile(r"\(Y/n\)", re.I),
             re.compile(r"\(y/N\)", re.I),
+            # Codex: "Would you like to run the following command?"
+            re.compile(r"Would\s+you\s+like\s+to\s+(?:run\s+the\s+following\s+command"
+                       r"|make\s+the\s+following\s+edits|grant\s+these\s+permissions)", re.I),
         ]
         self.done_patterns = [
             re.compile(r"✓\s+Done"),
         ]
+        # Report permission prompts at all (off when the agent has real hooks).
+        self.detect_permissions = True
+        # What the island's answer types into the agent. Under a PTY, "\r" is
+        # Enter for raw-mode TUIs (and becomes "\n" in cooked mode); pipes get
+        # a plain newline. A "No" never presses Enter under a PTY: in a select
+        # list, Enter picks the highlighted default — usually "Yes".
+        self.answer_yes_pty = "Y\r"
+        self.answer_no_pty = "n"
+        self.answer_yes_pipe = "Y\n"
+        self.answer_no_pipe = "n\n"
+        if any(name in agent_name.lower() for name in _MENU_AGENTS):
+            self.answer_yes_pty, self.answer_no_pty = "\r", "\x1b"
         self._agent_stdin: Optional[asyncio.StreamWriter] = None
-        self._pending_decision: Optional[bool] = None
         self._pty_master: Optional[int] = None  # set when running under a PTY
+        self._ws = None
+        self._pending_request: Optional[str] = None
+        self._quiet_until = 0.0
+        self._scan = ""  # recent ANSI-free output, scanned for prompts
+        self._last_prompt_id = ""
+        self._last_message = ""
+        self._last_message_at = 0.0
+        self._flush_handle: Optional[asyncio.TimerHandle] = None
 
-    def make_event(self, event_type: str, payload: dict) -> dict:
-        return {
+    def make_event(self, event_type: str, payload: dict, request_id: str = "") -> dict:
+        event = {
             "agent": self.agent_name,
             "type": event_type,
             "session_id": self.session_id,
             "payload": payload,
+            "ts": time.time(),
         }
+        if request_id:
+            event["request_id"] = request_id
+        return event
 
     def _meta_payload(self) -> dict:
         """model / ctx fields Dulus Bar shows for Dulus (empty for others)."""
@@ -102,31 +160,124 @@ class AgentWrapper:
                 self.ctx = (m.group(1) if m.groups() else m.group(0)).strip()[:16]
                 break
 
-    async def _send(self, ws, event_type: str, payload: dict) -> None:
+    async def _send(self, ws, event_type: str, payload: dict, request_id: str = "") -> None:
+        await self._send_raw(ws, self.make_event(event_type, payload, request_id))
+
+    @staticmethod
+    async def _send_raw(ws, data: dict) -> None:
         try:
-            await ws.send(json.dumps(self.make_event(event_type, payload)))
+            await ws.send(json.dumps(data))
         except Exception:
             pass
 
+    # --- output scanning -------------------------------------------------------
+    async def _feed(self, ws, clean: str) -> None:
+        """Scan new (ANSI-free) agent output for prompts, completion and status."""
+        self._scan = (self._scan + clean)[-4000:]
+        self._scan_meta(self._scan)
+        match = self._permission_match(self._scan) if self.detect_permissions else None
+        if match is not None:
+            prompt = self._scan.strip()[-200:]
+            prompt_id = self._prompt_line(self._scan, match)
+            # Whatever happens, this text has been seen: it must never match
+            # again later (that re-reported answered prompts as phantom cards).
+            self._scan = ""
+            # Right after an answer the TUI may repaint the *same* prompt once
+            # more; a different one is the agent's next question.
+            echo = time.monotonic() < self._quiet_until and prompt_id == self._last_prompt_id
+            if self._pending_request is None and not echo:
+                self._cancel_flush()
+                self._pending_request = uuid.uuid4().hex[:12]
+                self._last_prompt_id = prompt_id
+                await self._send(ws, "tool_request", {"tool": prompt, "args": ""},
+                                 request_id=self._pending_request)
+            return
+        if self._looks_like_done(self._scan):
+            self._scan = ""
+            self._cancel_flush()  # a late status line must not undo "done"
+            await self._send(ws, "completed", {"text": "done"})
+            return
+        if "\n" in clean:
+            lines = [line for line in clean.splitlines() if line.strip()]
+            if lines:
+                await self._message(ws, lines[-1])
+
+    async def _message(self, ws, line: str) -> None:
+        line = line.strip()[:100]
+        if not line or line == self._last_message:
+            return
+        self._last_message = line
+        now = time.monotonic()
+        if now - self._last_message_at >= MESSAGE_INTERVAL:
+            self._last_message_at = now
+            await self._send(ws, "message", {"text": line, **self._meta_payload()})
+        elif self._flush_handle is None:
+            self._flush_handle = asyncio.get_running_loop().call_later(
+                MESSAGE_INTERVAL, lambda: asyncio.ensure_future(self._flush_message(ws))
+            )
+
+    def _cancel_flush(self) -> None:
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+
+    async def _flush_message(self, ws) -> None:
+        self._flush_handle = None
+        self._last_message_at = time.monotonic()
+        await self._send(ws, "message", {"text": self._last_message, **self._meta_payload()})
+
+    def _prompt_settled(self) -> None:
+        """A prompt was answered (here or there): start clean."""
+        self._pending_request = None
+        self._scan = ""
+        self._quiet_until = time.monotonic() + PROMPT_GRACE
+
+    def _user_typed(self) -> None:
+        """Keys typed in the terminal answer a pending prompt there: withdraw
+        the island's card so it can't answer a second time."""
+        request_id = self._pending_request
+        if request_id is None:
+            return
+        self._prompt_settled()
+        if self._ws is not None:
+            asyncio.ensure_future(self._send_raw(self._ws, {"type": "cancel", "request_id": request_id}))
+
     async def _read_stdin(self, ws) -> None:
-        """Read user input from terminal and forward to agent."""
-        loop = asyncio.get_event_loop()
+        """Read user input from terminal and forward to agent.
+
+        readline() runs on a daemon thread: a worker-pool thread would keep
+        the wrapper alive after the agent exits, until you pressed Enter.
+        """
+        loop = asyncio.get_running_loop()
+        lines: "asyncio.Queue[str]" = asyncio.Queue()
+
+        def pump() -> None:
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                except Exception:
+                    line = ""
+                try:
+                    loop.call_soon_threadsafe(lines.put_nowait, line)
+                except RuntimeError:  # loop already closed
+                    return
+                if not line:
+                    return
+
+        threading.Thread(target=pump, daemon=True, name="dulus-bar-stdin").start()
         while True:
-            try:
-                line = await loop.run_in_executor(None, sys.stdin.readline)
-            except EOFError:
-                break
+            line = await lines.get()
             if not line:
                 break
             if self._agent_stdin is None:
                 continue
+            self._user_typed()
             self._agent_stdin.write(line.encode())
             await self._agent_stdin.drain()
 
     async def _read_stdout(self, process: asyncio.subprocess.Process, ws) -> None:
         if process.stdout is None:
             return
-        buffer = ""
         while True:
             chunk = await process.stdout.read(4096)
             if not chunk:
@@ -134,22 +285,8 @@ class AgentWrapper:
             text = chunk.decode("utf-8", errors="replace")
             sys.stdout.write(text)
             sys.stdout.flush()
-
-            if ws is None:
-                continue
-
-            buffer += text
-            if self._looks_like_permission(buffer):
-                await self._send(ws, "tool_request", {"tool": buffer.strip()[-200:], "args": ""})
-                buffer = buffer[-500:]
-            elif self._looks_like_done(buffer):
-                await self._send(ws, "completed", {"text": "done"})
-                buffer = buffer[-500:]
-            elif "\n" in text:
-                self._scan_meta(buffer)
-                line = text.rsplit("\n", 2)[-2]
-                if line.strip():
-                    await self._send(ws, "message", {"text": line.strip()[:100], **self._meta_payload()})
+            if ws is not None:
+                await self._feed(ws, text)
 
     async def _read_stderr(self, process: asyncio.subprocess.Process, ws) -> None:
         if process.stderr is None:
@@ -161,11 +298,30 @@ class AgentWrapper:
             sys.stderr.write(chunk.decode("utf-8", errors="replace"))
             sys.stderr.flush()
 
+    def _permission_match(self, buffer: str) -> Optional["re.Match[str]"]:
+        for pattern in self.permission_patterns:
+            match = pattern.search(buffer)
+            if match:
+                return match
+        return None
+
     def _looks_like_permission(self, buffer: str) -> bool:
-        return any(p.search(buffer) for p in self.permission_patterns)
+        return self._permission_match(buffer) is not None
+
+    @staticmethod
+    def _prompt_line(buffer: str, match: "re.Match[str]") -> str:
+        """The whole line a prompt matched on: what tells two prompts apart."""
+        start = buffer.rfind("\n", 0, match.start()) + 1
+        end = buffer.find("\n", match.end())
+        return " ".join(buffer[start:len(buffer) if end == -1 else end].split())
 
     def _looks_like_done(self, buffer: str) -> bool:
         return any(p.search(buffer) for p in self.done_patterns)
+
+    def _answer(self, approved: bool) -> bytes:
+        if self._pty_master is not None:
+            return (self.answer_yes_pty if approved else self.answer_no_pty).encode()
+        return (self.answer_yes_pipe if approved else self.answer_no_pipe).encode()
 
     async def _write_to_agent(self, data: bytes) -> None:
         """Send bytes to the agent's stdin, whichever transport is active."""
@@ -183,22 +339,33 @@ class AgentWrapper:
                 pass
 
     async def _listen_decisions(self, ws) -> None:
-        """Listen for decisions from the island and inject them into the agent stdin."""
+        """Listen for decisions from the island and type them into the agent."""
         try:
             async for raw in ws:
                 try:
                     data = json.loads(raw)
-                except json.JSONDecodeError:
+                except (TypeError, ValueError):
                     continue
-                if data.get("type") != "decision":
+                if not isinstance(data, dict):
                     continue
-                if data.get("session_id") != self.session_id:
+                kind = data.get("type")
+                request_id = data.get("request_id")
+                if kind == "request_resolved" and request_id and request_id == self._pending_request:
+                    self._prompt_settled()  # e.g. withdrawn by the hub
                     continue
-                approved = data.get("payload", {}).get("approved", False)
+                if kind != "decision" or self._pending_request is None:
+                    continue  # never type an answer when nothing is being asked
+                if request_id:
+                    if request_id != self._pending_request:
+                        continue
+                elif data.get("session_id") != self.session_id:
+                    continue
                 if self._agent_stdin is None and self._pty_master is None:
                     continue
-                answer = "Y\n" if approved else "n\n"
-                await self._write_to_agent(answer.encode())
+                payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+                approved = bool(payload.get("approved"))
+                self._prompt_settled()
+                await self._write_to_agent(self._answer(approved))
                 await self._send(ws, "tool_approved" if approved else "tool_denied", {"approved": approved})
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -240,6 +407,7 @@ class AgentWrapper:
 
         env = os.environ.copy()
         env["DULUS_BAR_SESSION_ID"] = self.session_id
+        env["DULUS_BAR_AGENT"] = self.agent_name  # agents using dulus_bar.client join this row
         env["VIBE_ISLAND_SESSION_ID"] = self.session_id  # back-compat
         env.setdefault("TERM", "xterm-256color")
 
@@ -264,10 +432,11 @@ class AgentWrapper:
         ws = await self._connect_with_retry()
         if ws is None:
             print(
-                f"[dulus-bar] no pude conectar a {EVENT_SERVER}.\n"
-                "  Abre la barra primero:  dulusbar  (o ./dulusbar en mac/Linux, connect.cmd en Windows)",
+                f"[dulus-bar] couldn't reach Dulus Bar at {EVENT_SERVER}.\n"
+                "  Start the island first:  dulusbar  (./dulusbar on macOS/Linux, connect.cmd on Windows)",
                 file=sys.stderr,
             )
+        self._ws = ws
 
         loop = asyncio.get_running_loop()
         out_q: "asyncio.Queue[bytes]" = asyncio.Queue()
@@ -288,7 +457,7 @@ class AgentWrapper:
         except Exception:
             os.close(master)
             self._pty_master = None
-            print("[dulus-bar] PTY no soportado aquí; cayendo a pipes", file=sys.stderr)
+            print("[dulus-bar] PTY unsupported here; falling back to pipes", file=sys.stderr)
             return await self._run_pipes()
 
         # Raw-mode keyboard bridge so interactive UIs get arrows/ctrl keys.
@@ -306,6 +475,8 @@ class AgentWrapper:
             except OSError:
                 data = b""
             if data:
+                if is_user_input(data):
+                    self._user_typed()
                 try:
                     os.write(master, data)
                 except OSError:
@@ -323,6 +494,7 @@ class AgentWrapper:
                     await self._send(ws, "session_started", {
                         "pid": process.pid,
                         "terminal_hint": self.agent_name,
+                        "cwd": os.getcwd(),
                         **self._meta_payload(),
                     })
                     await asyncio.gather(
@@ -334,6 +506,7 @@ class AgentWrapper:
         except Exception as exc:
             print(f"[dulus-bar] websocket error: {exc}", file=sys.stderr)
         finally:
+            self._ws = None
             for fd in (stdin_fd, master):
                 try:
                     loop.remove_reader(fd)
@@ -357,32 +530,20 @@ class AgentWrapper:
 
     async def _pump_pty(self, out_q: "asyncio.Queue[bytes]", ws) -> None:
         """Forward PTY output to the user's terminal and the island."""
-        buffer = ""
         stdout = sys.stdout.buffer
         while True:
             chunk = await out_q.get()
             if not chunk:
+                if ws is not None:
+                    await ws.close()  # agent exited: end _listen_decisions too
                 return
             try:
                 stdout.write(chunk)
                 stdout.flush()
             except Exception:
                 pass
-            if ws is None:
-                continue
-            clean = _strip_ansi(chunk.decode("utf-8", errors="replace"))
-            buffer = (buffer + clean)[-4000:]
-            self._scan_meta(buffer)
-            if self._looks_like_permission(buffer):
-                await self._send(ws, "tool_request", {"tool": buffer.strip()[-200:], "args": ""})
-                buffer = buffer[-500:]
-            elif self._looks_like_done(buffer):
-                await self._send(ws, "completed", {"text": "done"})
-                buffer = buffer[-500:]
-            elif "\n" in clean:
-                line = clean.rsplit("\n", 2)[-2]
-                if line.strip():
-                    await self._send(ws, "message", {"text": line.strip()[:100], **self._meta_payload()})
+            if ws is not None:
+                await self._feed(ws, _strip_ansi(chunk.decode("utf-8", errors="replace")))
 
     async def _run_pipes(self) -> int:
         """Original pipe-based transport (Windows, or no TTY attached)."""
@@ -396,6 +557,7 @@ class AgentWrapper:
 
         env = os.environ.copy()
         env["DULUS_BAR_SESSION_ID"] = self.session_id
+        env["DULUS_BAR_AGENT"] = self.agent_name  # agents using dulus_bar.client join this row
         env["VIBE_ISLAND_SESSION_ID"] = self.session_id  # back-compat
 
         try:
@@ -415,36 +577,44 @@ class AgentWrapper:
         ws = await self._connect_with_retry()
         if ws is None:
             print(
-                f"[dulus-bar] no pude conectar a {EVENT_SERVER}.\n"
-                "  Abre la barra primero:  dulusbar  (o ./dulusbar en mac/Linux, connect.cmd en Windows)",
+                f"[dulus-bar] couldn't reach Dulus Bar at {EVENT_SERVER}.\n"
+                "  Start the island first:  dulusbar  (./dulusbar on macOS/Linux, connect.cmd on Windows)",
                 file=sys.stderr,
             )
             # Still run the agent — just without the island feed
+            stdin_task = asyncio.ensure_future(self._read_stdin(None))
             try:
-                await asyncio.gather(
-                    self._read_stdout_no_ws(process),
-                    self._read_stderr(process, None),
-                    self._read_stdin(None),
-                )
+                await asyncio.gather(self._read_stdout_no_ws(process), self._read_stderr(process, None))
             except Exception:
                 pass
+            finally:
+                stdin_task.cancel()
             return await process.wait()
 
+        self._ws = ws
         try:
             async with ws:
                 await self._send(ws, "session_started", {
                     "pid": process.pid,
                     "terminal_hint": self.agent_name,
+                    "cwd": os.getcwd(),
                     **self._meta_payload(),
                 })
-                await asyncio.gather(
-                    self._read_stdout(process, ws),
-                    self._read_stderr(process, ws),
-                    self._read_stdin(ws),
-                    self._listen_decisions(ws),
-                )
+                # The agent's output decides when we're done; input and the
+                # island listener stop with it instead of keeping us alive.
+                background = [
+                    asyncio.ensure_future(self._read_stdin(ws)),
+                    asyncio.ensure_future(self._listen_decisions(ws)),
+                ]
+                try:
+                    await asyncio.gather(self._read_stdout(process, ws), self._read_stderr(process, ws))
+                finally:
+                    for task in background:
+                        task.cancel()
         except Exception as exc:
             print(f"[dulus-bar] websocket error: {exc}", file=sys.stderr)
+        finally:
+            self._ws = None
 
         return await process.wait()
 

@@ -95,6 +95,36 @@ class NativeBackend:
     def activate_window(self, handle: object) -> bool:
         return False
 
+    def find_window_for_pid(self, pid: int) -> Optional[WindowInfo]:
+        """The window hosting a process: the nearest ancestor that owns one.
+
+        An agent's own process rarely owns a window — its terminal does
+        (claude -> shell -> gnome-terminal-server / Terminal.app / Code).
+        """
+        try:
+            import psutil
+        except ImportError:
+            return None
+        by_pid = {}
+        for window in self.list_windows():
+            if window.pid:
+                by_pid.setdefault(window.pid, window)
+        if not by_pid:
+            return None
+        try:
+            process = psutil.Process(pid)
+            chain = [process, *process.parents()]
+        except psutil.Error:
+            return None
+        for proc in chain[:16]:
+            if proc.pid in by_pid:
+                return by_pid[proc.pid]
+        return None
+
+    def focus_pid(self, pid: int) -> bool:
+        window = self.find_window_for_pid(pid) if pid else None
+        return bool(window and self.activate_window(window.handle))
+
     def jump_to_terminal(self, title_hint: str = "") -> bool:
         if title_hint:
             w = self.find_window_by_title(title_hint)

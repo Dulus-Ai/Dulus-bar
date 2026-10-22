@@ -4,8 +4,10 @@ struct IslandView: View {
     @ObservedObject var model: IslandModel
     let notch: NotchMetrics
 
-    private var width: CGFloat { model.expanded ? 344 : notch.width }
-    private var height: CGFloat { model.expanded ? (model.permission == nil ? 94 : 142) : notch.height }
+    static let expandedWidth: CGFloat = 372
+
+    private var width: CGFloat { model.expanded ? Self.expandedWidth : notch.width }
+    private var height: CGFloat { model.cardHeight(notchHeight: notch.height) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +19,7 @@ struct IslandView: View {
 
                 if model.expanded {
                     expandedContent
-                        .frame(width: width, height: height)
+                        .frame(width: width, height: height, alignment: .top)
                         .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                 }
             }
@@ -29,6 +31,7 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.42, dampingFraction: 0.82, blendDuration: 0.12), value: model.expanded)
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: width)
+        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: height)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Dulus Bar")
     }
@@ -49,6 +52,12 @@ struct IslandView: View {
                             Text(session.agent)
                                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 .foregroundStyle(.white)
+                            if !session.title.isEmpty {
+                                Text(session.title)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.42))
+                                    .lineLimit(1)
+                            }
                             if !session.model.isEmpty {
                                 Text(session.model)
                                     .font(.system(size: 10, weight: .medium))
@@ -56,7 +65,9 @@ struct IslandView: View {
                                     .lineLimit(1)
                             }
                         }
-                        Text(session.message.isEmpty ? session.status : session.message)
+                        // While a request is up the card below says what it is.
+                        Text(model.permission != nil ? "needs your approval"
+                             : (session.message.isEmpty ? session.status : session.message))
                             .font(.system(size: 11, weight: .regular))
                             .foregroundStyle(.white.opacity(0.62))
                             .lineLimit(1)
@@ -84,20 +95,60 @@ struct IslandView: View {
                 }
             }
 
-            if model.permission != nil {
-                HStack(spacing: 9) {
-                    Button("Deny") { model.decide(false) }
-                        .buttonStyle(IslandButtonStyle(primary: false))
-                        .accessibilityLabel("Deny agent permission")
-                    Button("Allow") { model.decide(true) }
-                        .buttonStyle(IslandButtonStyle(primary: true))
-                        .accessibilityLabel("Allow agent permission")
-                }
+            if let request = model.permission {
+                permissionCard(request)
             }
         }
         .padding(.top, notch.height + 9)
         .padding(.horizontal, 18)
         .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private func permissionCard(_ request: PermissionRequest) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(request.tool.isEmpty ? "Run a tool?" : request.tool)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if model.permissions.count > 1 {
+                    Text("1 of \(model.permissions.count)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange))
+                        .accessibilityLabel("\(model.permissions.count) requests waiting")
+                }
+            }
+            if !request.detailLine.isEmpty {
+                Text(request.detailLine)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color.white.opacity(0.08)))
+            }
+        }
+        HStack(spacing: 9) {
+            Button("Deny") { model.decide(false) }
+                .buttonStyle(IslandButtonStyle(primary: false))
+                .accessibilityLabel("Deny agent permission")
+            if request.canAlways {
+                Button("Always") { model.decide(true, always: true) }
+                    .buttonStyle(IslandButtonStyle(primary: false))
+                    .help(request.alwaysLabel.isEmpty ? "Don't ask again" : "Don't ask again for \(request.alwaysLabel)")
+                    .accessibilityLabel("Always allow")
+            }
+            Button("Allow") { model.decide(true) }
+                .buttonStyle(IslandButtonStyle(primary: true))
+                .accessibilityLabel("Allow agent permission")
+        }
     }
 
     private func statusOrb(_ status: String) -> some View {

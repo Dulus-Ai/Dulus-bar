@@ -29,6 +29,7 @@ __all__ = [
     "get_backend",
     "activate_window",
     "find_window_by_title",
+    "focus_pid",
     "jump_to_terminal",
     "open_terminal",
     "open_terminal_running",
@@ -77,6 +78,11 @@ def find_window_by_title(title_substring: str) -> Optional[WindowInfo]:
 
 def jump_to_terminal(title_hint: str = "") -> bool:
     return get_backend().jump_to_terminal(title_hint)
+
+
+def focus_pid(pid: int) -> bool:
+    """Raise the window (terminal, editor…) that hosts process ``pid``."""
+    return get_backend().focus_pid(pid)
 
 
 def open_terminal() -> bool:

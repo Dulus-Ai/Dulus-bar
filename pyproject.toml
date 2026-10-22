@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dulus-bar"
-version = "0.4.3"
+version = "0.5.0"
 description = "Dulus Bar — a cross-platform Dynamic Island for your AI agents (Windows / macOS / Linux)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [{name = "Dulus", email = "dev@dulus.ai"}]
 keywords = [
     "ai", "agents", "overlay", "dynamic-island", "notch",
-    "claude", "codex", "gemini", "cursor", "dulus",
+    "claude", "claude-code", "hooks", "codex", "gemini", "cursor", "dulus",
     "windows", "macos", "linux",
 ]
 classifiers = [
@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.0"]
+dev = ["pytest>=7"]
 
 [project.scripts]
 dulusbar = "dulus_bar.main:main"
@@ -55,3 +56,6 @@ exclude = ["wrappers*", "assets*", "dist*", "build*"]
 
 [tool.setuptools.package-data]
 dulus_bar = ["assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
