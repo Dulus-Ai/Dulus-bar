@@ -7,6 +7,7 @@
 #   ./dulusbar --island-only       # just the bar
 #   ./dulusbar --dulus-only        # just Dulus (bar assumed already running)
 #   ./dulusbar --dulus /path/to/dulus.py [args...]
+#   ./dulusbar status | hooks install | doctor | …   # the dulusbar CLI
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +16,12 @@ export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || { echo "[dulusbar] $PY not found on PATH"; exit 1; }
+
+# CLI subcommands go straight to the Python CLI (dulusbar status / hooks / ask …).
+case "${1:-}" in
+  run|status|notify|ask|wrap|hooks|hook|doctor|quit|--version|-h|--help)
+    exec "$PY" -m dulus_bar "$@" ;;
+esac
 
 # Wrappers ship inside the package; fall back to the old repo-root layout.
 WRAPPERS="$ROOT/dulus_bar/wrappers"

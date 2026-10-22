@@ -1,14 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build:  pyinstaller --noconfirm DulusBar.spec
-# Produces a windowed (no-console) Dulus Bar binary in dist/.
+# Produces a windowed (no-console) Dulus Bar binary in dist/. The binary is
+# also the CLI: `DulusBar hooks install`, `DulusBar status`, … (hooks and
+# launched agents re-invoke it, so no separate Python is needed).
 import sys
 
 a = Analysis(
     ['dulus_bar/main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    # The bird: tray icon, window icon and the island's brand mark.
+    datas=[('dulus_bar/assets/dulus-bird.png', 'dulus_bar/assets')],
+    # Imported lazily (per platform / per command), so list them explicitly.
+    hiddenimports=[
+        'dulus_bar.overlay',
+        'dulus_bar.doctor',
+        'dulus_bar.integrations.claude',
+        'dulus_bar.integrations.codex',
+        'dulus_bar.wrappers.base_wrapper',
+        'dulus_bar.native.linux',
+        'dulus_bar.native.macos',
+        'dulus_bar.native.windows',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

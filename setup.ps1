@@ -69,6 +69,14 @@ if (-not $SkipProfile) {
 # >>> dulus-bar (auto) >>>
 function dulusbar {
     param([Parameter(ValueFromRemainingArguments=`$true)][string[]]`$Args)
+    # CLI subcommands (status, hooks, ask, ...) go to the Python CLI; anything
+    # else keeps the classic "bar + Dulus" behaviour.
+    `$cli = @('run','status','notify','ask','wrap','hooks','hook','doctor','quit','--version','-h','--help')
+    if (`$Args.Count -gt 0 -and `$cli -contains `$Args[0]) {
+        `$env:PYTHONPATH = "$Root;`$env:PYTHONPATH"
+        & python -m dulus_bar @Args
+        return
+    }
     & powershell -NoProfile -ExecutionPolicy Bypass -File "$Root\connect.ps1" @Args
 }
 function dulusbar-only {
@@ -105,4 +113,6 @@ Write-Host "  dulusbar               # bar + Dulus" -ForegroundColor White
 Write-Host "  dulusbar-only          # just the bar" -ForegroundColor White
 Write-Host "  dulus-connect [args]   # just Dulus wired to the bar" -ForegroundColor White
 Write-Host "  .\connect.cmd          # double-click, no terminal" -ForegroundColor White
+Write-Host "  dulusbar hooks install # connect Claude Code / Codex" -ForegroundColor White
+Write-Host "  dulusbar doctor        # check the setup" -ForegroundColor White
 Write-Host ""

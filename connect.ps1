@@ -84,7 +84,7 @@ function Start-Bar {
             return
         }
     }
-    Write-Warn "Dulus Bar did not answer the websocket in time. Check that PyQt6 opened the bar."
+    Write-Warn "Dulus Bar did not answer the websocket in time. Check that PySide6 opened the bar (dulusbar doctor)."
 }
 
 function Save-DulusPathFile([string]$PathValue) {

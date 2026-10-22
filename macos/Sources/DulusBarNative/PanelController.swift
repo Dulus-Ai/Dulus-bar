@@ -23,7 +23,8 @@ final class PanelController {
 
         // A transparent interaction canvas begins at the physical top edge.
         // Only the black SwiftUI shape paints; the rest never obstructs content.
-        let panelSize = CGSize(width: 430, height: 190)
+        // Tall enough for the largest card (a request with its command line).
+        let panelSize = CGSize(width: 460, height: 260)
         let origin = CGPoint(
             x: screen.frame.midX - panelSize.width / 2,
             y: screen.frame.maxY - panelSize.height
@@ -73,11 +74,13 @@ final class PanelController {
             width: notch.width,
             height: triggerHeight
         )
-        let visibleHeight: CGFloat = model.expanded ? (model.permission == nil ? 94 : 142) : notch.height
+        // Same numbers the view draws with, so hover matches the card exactly.
+        let visibleHeight = model.cardHeight(notchHeight: notch.height)
+        let hitWidth = IslandView.expandedWidth + 16
         let expandedHit = CGRect(
-            x: notch.screenFrame.midX - 180,
+            x: notch.screenFrame.midX - hitWidth / 2,
             y: notch.screenFrame.maxY - visibleHeight - 8,
-            width: 360,
+            width: hitWidth,
             height: visibleHeight + 16
         )
 

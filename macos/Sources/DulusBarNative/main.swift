@@ -17,9 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController = PanelController(model: model)
 
         let url = Self.webSocketURL()
-        let client = WebSocketClient(url: url, model: model)
-        model.sendDecision = { [weak client] event, approved in
-            client?.sendDecision(for: event, approved: approved)
+        let token = ProcessInfo.processInfo.environment["DULUS_BAR_TOKEN"] ?? ""
+        let client = WebSocketClient(url: url, token: token, model: model)
+        model.sendDecision = { [weak client] request, approved, always in
+            client?.sendDecision(for: request, approved: approved, always: always)
         }
         webSocket = client
         client.start()

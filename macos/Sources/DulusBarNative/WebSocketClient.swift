@@ -1,15 +1,22 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 @MainActor
 final class WebSocketClient {
     private let url: URL
+    private let token: String
     private unowned let model: IslandModel
     private var socket: URLSessionWebSocketTask?
     private var worker: Task<Void, Never>?
     private var stopped = false
 
-    init(url: URL, model: IslandModel) {
+    /// `token` is the per-run hub token: only an authenticated island may
+    /// answer a request. It arrives in the environment, never on argv.
+    init(url: URL, token: String, model: IslandModel) {
         self.url = url
+        self.token = token
         self.model = model
     }
 
@@ -30,18 +37,36 @@ final class WebSocketClient {
         model.setConnected(false)
     }
 
-    func sendDecision(for event: AgentEvent, approved: Bool) {
-        guard let socket else { return }
-        let message: [String: Any] = [
-            "agent": event.agent,
+    func sendDecision(for request: PermissionRequest, approved: Bool, always: Bool) {
+        send([
+            "agent": request.agent,
             "type": "decision",
-            "session_id": event.sessionID,
-            "payload": ["approved": approved],
+            "session_id": request.sessionID,
+            "request_id": request.requestID,
+            "payload": ["approved": approved, "always": always],
+        ])
+    }
+
+    private var hello: [String: Any] {
+        [
+            "type": "hello",
+            "v": 2,
+            "role": "ui",
+            "token": token,
+            "client": "dulus-bar-native",
+            // Older hubs treat this as a health probe instead of an agent.
+            "agent": "_health",
+            "session_id": "_health",
         ]
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+    }
+
+    private func send(_ message: [String: Any], on task: URLSessionWebSocketTask? = nil) {
+        guard let socket = task ?? socket,
+              let data = try? JSONSerialization.data(withJSONObject: message),
+              let text = String(data: data, encoding: .utf8) else { return }
         Task {
             do {
-                try await socket.send(.data(data))
+                try await socket.send(.string(text))
             } catch {
                 model.setConnected(false)
             }
@@ -54,7 +79,7 @@ final class WebSocketClient {
             let task = URLSession.shared.webSocketTask(with: url)
             socket = task
             task.resume()
-            model.setConnected(true)
+            send(hello, on: task)
 
             do {
                 try await receiveMessages(from: task)
@@ -85,10 +110,25 @@ final class WebSocketClient {
             case .string(let text): data = Data(text.utf8)
             @unknown default: continue
             }
-            guard let event = try? JSONDecoder().decode(AgentEvent.self, from: data) else {
-                continue
-            }
-            model.consume(event)
+            handle(data)
+        }
+    }
+
+    /// One message from the hub (internal so tests can feed recorded traffic).
+    func handle(_ data: Data) {
+        let decoder = JSONDecoder()
+        guard let envelope = try? decoder.decode(Envelope.self, from: data) else { return }
+        switch envelope.type {
+        case "welcome":
+            model.setConnected(true)
+        case "snapshot":
+            if let snapshot = try? decoder.decode(Snapshot.self, from: data) { model.load(snapshot) }
+        case "error" where envelope.agent == nil:
+            // The hub's own error (e.g. a bad token: it closes us next). An
+            // agent's "error" event carries an agent and goes to the model.
+            model.setConnected(false)
+        default:
+            if let event = try? decoder.decode(AgentEvent.self, from: data) { model.consume(event) }
         }
     }
 }
