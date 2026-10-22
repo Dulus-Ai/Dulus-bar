@@ -446,7 +446,24 @@ def _windows_console(argv: List[str]) -> None:
         pass
 
 
+def _utf8_output() -> None:
+    """Never let our own output crash the command.
+
+    A redirected stdout on Windows is cp1252, where the ``✓``/``✗`` marks raise
+    UnicodeEncodeError — ``dulusbar doctor > log.txt``, a pipe, CI. Ask the
+    stream for UTF-8, and replace instead of raising if it can't.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if (getattr(stream, "encoding", "") or "").lower().replace("-", "") == "utf8":
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _utf8_output()
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = [a for a in argv if not a.startswith("-psn_")]  # macOS Finder launch noise
     if argv[:2] == ["hook", "claude"]:  # hot path: skip argparse entirely

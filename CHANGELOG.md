@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+### Fixes
+
+- **`dulusbar doctor > log.txt` crashed** (and any command whose output was
+  redirected or piped) with `UnicodeEncodeError`: a redirected stdout on Windows
+  is `cp1252`, which can't encode the `✓ ✗ ·` marks. Output now goes out as UTF-8
+  with `errors="replace"`, and a diagnostic line falls back to ASCII instead of
+  raising — a diagnostic must never crash.
+
 ## 0.5.0
 
 The island grows up: first-class Claude Code support, a real protocol, and a

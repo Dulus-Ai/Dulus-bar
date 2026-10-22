@@ -2,11 +2,14 @@
 
 import io
 import json
+import os
+import subprocess
+import sys
 import threading
 
 import pytest
 
-from conftest import free_port, wait_for
+from conftest import ROOT, free_port, wait_for
 from dulus_bar import __version__, cli
 from dulus_bar.server import AgentEventServer
 
@@ -118,3 +121,22 @@ def test_doctor_runs(published_hub, capsys):
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "Dulus Bar" in out and "island" in out and "Claude Code" in out
+
+
+def test_doctor_survives_a_redirected_stdout():
+    """`dulusbar doctor > log.txt` used to die with UnicodeEncodeError: on
+    Windows a redirected stdout is cp1252, where '✓' cannot be encoded."""
+    env = dict(os.environ)
+    env.pop("PYTHONIOENCODING", None)
+    env["DULUS_BAR_PORT"] = str(free_port())  # no island to probe
+    proc = subprocess.run(
+        [sys.executable, "-m", "dulus_bar", "doctor"],
+        cwd=str(ROOT), capture_output=True, timeout=180, env=env,
+    )
+    err = proc.stderr.decode("utf-8", "replace")
+    assert "UnicodeEncodeError" not in err, err
+    assert "Traceback" not in err, err
+    assert proc.returncode in (0, 1), err
+    out = proc.stdout.decode("utf-8")  # strict: the output really is UTF-8 now
+    assert "Dulus Bar" in out
+    assert "✓" in out or "✗" in out

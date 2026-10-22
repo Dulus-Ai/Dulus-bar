@@ -15,7 +15,11 @@ OK, WARN, BAD, INFO = "✓", "!", "✗", "·"
 
 
 def _line(mark: str, label: str, detail: str = "") -> None:
-    print(f"  {mark} {label:<16} {detail}".rstrip())
+    text = f"  {mark} {label:<16} {detail}".rstrip()
+    try:
+        print(text)
+    except UnicodeEncodeError:  # a diagnostic must never crash (cp1252 console)
+        print(text.encode("ascii", "replace").decode("ascii"))
 
 
 def _deps() -> int:
