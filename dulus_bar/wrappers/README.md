@@ -10,7 +10,8 @@ dulusbar wrap Gemini -- gemini
 
 > **Claude Code doesn't need a wrapper**: `dulusbar hooks install claude` wires it
 > through its own hooks (status, model, context and Allow / Deny). With the hooks
-> installed, `claude_wrapper.py` simply runs `claude`.
+> installed, every wrapper (`claude_wrapper.py`, `dulusbar wrap "Claude Code" -- claude`,
+> *Open agent…*) simply runs `claude`.
 
 ## How they work
 
@@ -23,6 +24,10 @@ dulusbar wrap Gemini -- gemini
 5. Type the island's Allow / Deny into the agent — only while a prompt is
    pending. Answer in the terminal instead and the island's card is withdrawn.
 6. If the bar isn't up, the agent **still runs** (just without the live feed).
+7. If the agent reports to the island **itself** (it uses `dulus_bar/client.py`
+   with the `DULUS_BAR_AGENT` / `DULUS_BAR_SESSION_ID` the wrapper exports), its
+   own reports win: the hub withdraws the wrapper's scraped cards and the
+   wrapper stops scraping. See PROTOCOL.md, "Running under a wrapper".
 
 For Dulus, the wrapper also reports the active **model** and **context usage**,
 which the bar renders next to the Dulus session (other agents just show status).

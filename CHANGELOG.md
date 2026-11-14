@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+Not on PyPI yet: it ships once Dulus speaks *Always allow* (see PROTOCOL.md).
+
+### New
+
+- **macOS: hold Allow to always allow.** Hold the button: it fills up, the
+  trackpad taps once, done — a click still allows just once, and dragging off
+  backs out. Right-click Allow for both spelled out; VoiceOver gets an
+  "Always allow" action. Offered only when the agent can save the rule.
+- **A redesigned native macOS island.** It *is* the notch (Macs without one get
+  one drawn in the menu bar's empty middle) and pours open from it, its top
+  corners flaring into the menu bar. Collapsed, a small light per live agent
+  sits under the notch — green working, amber waiting for you, red failed.
+  Open, it lists every session (agent icon and color, project, what it's doing,
+  model · context, for how long) or the request waiting for you, its command
+  verbatim and wrapped, never cut off; a finished agent peeks open on its own.
+- **Click a session (macOS)** to bring up the terminal or editor it runs in.
+- **Agents opened from the macOS menu bar icon show up on the island** (they
+  run under `dulusbar wrap`), and the menu can connect Claude Code.
+- **Ready for Dulus.** What an agent reports for itself while it runs under
+  `dulusbar wrap` now wins over the wrapper's screen-scraping — its own
+  requests (one card per prompt, not a second one read off the terminal), its
+  own status — while whatever it doesn't report yet still comes from the
+  wrapper. PROTOCOL.md says how an agent offers *Always allow* and keeps the
+  rule in its own settings.
+
+### Fixes
+
+- **The native macOS island never came with `pip install`**: its Swift sources
+  weren't in the package, so every pip install fell back to the Qt island. They
+  ship now and are built once per version into `~/Library/Caches/Dulus Bar`
+  (shared by all your installs); started from a terminal, that first build
+  happens in front of you. A Mac
+  without the Xcode Command Line Tools gets the Qt island straight away instead
+  of an installer dialog, and a native island that dies at launch falls back
+  to Qt too.
+- **A double-click could answer the next request in the queue**, one you never
+  saw. A new card's buttons now wake up after 350 ms (both islands), and on
+  macOS an answer is bound to the card it was given on.
+- **Text that hides part of a command** — a right-to-left override, a carriage
+  return — is shown as `⟨U+202E⟩` on the card instead of rearranging it.
+- **macOS island**: stayed at the old place after a display was plugged in or
+  out; its hover area was a guess at the card's height (now measured); a hub
+  restart with a card up could leave it stuck open; the first click on it could
+  be lost; reconnecting kept slowing down after every hub restart.
+- **Opening an agent from the macOS Qt island's menu** silently fell back to a
+  fragile inline AppleScript (`os` wasn't imported), which broke on any path
+  with a quote in it; an agent named after a file like `kev's-agent.py` now
+  opens too.
+- **Wrapping Claude Code with its hooks installed** (`dulusbar wrap "Claude Code"
+  -- claude`, or *Open agent… → Claude Code*) added a second, screen-scraped
+  row: running `claude` now just runs it. Without the hooks, any Claude Code
+  wrapper now recognizes Claude's "Do you want to proceed?".
+- Short agent aliases matched inside other words: "Example Agent" got Amp's
+  icon, "Organized" Zed's. They only match whole words now.
+- Model names in a dark brand color (Grok, Ollama) were unreadable on the dark
+  island; they're lifted to stay legible.
+- The *Always allow* hint for Claude Code's mode suggestions reads "all edits"
+  instead of "mode: acceptEdits".
+
 ## 0.5.1
 
 ### Fixes

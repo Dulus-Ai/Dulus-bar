@@ -82,10 +82,12 @@ cd Dulus-bar
 
 > Linux tip: for click-to-focus of a terminal on X11, install `wmctrl` or `xdotool`.
 >
-> macOS: `setup.sh` also builds the native SwiftUI/AppKit notch surface using the
-> Swift toolchain in Xcode Command Line Tools (and it rebuilds itself after a
-> `git pull`). The Python process stays the local WebSocket hub; Windows and Linux
-> use the PySide6 overlay.
+> macOS: the native SwiftUI/AppKit notch island is built on the first start —
+> from a pip install or a checkout (`setup.sh` builds it right away) — with the
+> Swift toolchain in the Xcode Command Line Tools (`xcode-select --install`). It
+> rebuilds itself when its sources change (`git pull`, `pip install -U`). The
+> Python process stays the local WebSocket hub; Windows and Linux use the PySide6
+> overlay.
 
 </details>
 
@@ -106,7 +108,9 @@ and each one shows up on its own — no wrapper needed:
 - **Allow · Always allow · Deny** — every permission prompt appears on the island
   with the exact command, file or URL. Claude Code still shows its own dialog in
   the terminal; whichever you answer first wins, and the other one goes away.
-  *Always allow* applies the same "don't ask again" rule Claude would offer you.
+  *Always allow* applies the same "don't ask again" rule Claude would offer you:
+  on macOS **hold Allow** until it fills (or right-click it), on Windows / Linux
+  click *Always allow*.
 - **Zero drag** — the status hooks run in the background, and when the island
   isn't running every hook exits instantly without output: Claude Code behaves
   exactly as if Dulus Bar weren't installed.
@@ -174,7 +178,9 @@ with BarClient(agent="My Agent") as bar:
 ```
 
 The full wire format — events, permission requests, decisions, auth — is in
-[PROTOCOL.md](PROTOCOL.md).
+[PROTOCOL.md](PROTOCOL.md). Want *Always allow* for your agent? Offer it with
+`can_always=True` and save the rule when the answer says `always` — the island
+never keeps rules of its own ([how](PROTOCOL.md#always-allow)).
 
 ## Works beautifully with Dulus (optional)
 
@@ -243,7 +249,7 @@ dulus_bar/
   agents.py         Per-agent icon + accent color registry
   native/           win32 / pyobjc / wmctrl window focus per platform
   wrappers/         PTY / pipe wrapper for any CLI agent
-macos/              Native SwiftUI/AppKit notch surface
+  macos/            Native SwiftUI/AppKit notch island (built on first start)
 ```
 
 ---
@@ -266,8 +272,12 @@ re-invoke it, so no separate Python install is needed.
 
 - **Windows** — fully tested. `pywin32` for window focus; PySide6 overlay with
   reveal-on-hover.
-- **macOS** — notch hugging + always-visible via the native SwiftUI surface (or
-  `pyobjc` in the Qt fallback). Without either, still runs as a plain top-most island.
+- **macOS** — the native island *is* the notch (on Macs without one it draws
+  one in the menu bar's empty middle), with a small light per live agent under
+  it, and it pours open into the card. Hold **Allow** to always allow; click a
+  session to bring up the terminal or editor it runs in; agents opened from its
+  menu bar icon are wired to the island. Without the Xcode Command Line Tools it
+  uses the Qt island (notch-aware through `pyobjc`).
 - **Linux** — anchors to the top of the *work area* (never under a panel/dock)
   and takes itself out of the window manager's placement policy on X11, so it
   stays at the top instead of being re-centred. On Wayland it runs through
@@ -293,6 +303,7 @@ Most settings live in the menu (**Settings**). Environment variables still win:
 | `DULUS_BAR_ALLOWED_ORIGINS=<a,b>` | Let specific web origins connect (e.g. your own dashboard). |
 | `DULUS_BAR_DEBUG=1` | Log hook errors to `hooks.log` in the settings dir. |
 | `DULUS_BAR_FORCE_QT=1` | macOS: use the Qt island instead of the native one. |
+| `DULUS_BAR_NATIVE_BINARY=<path>` | macOS: run this build of the native island (e.g. your own `swift build`). |
 | `DULUS_BAR_X11_WM=1` | Linux: let the window manager manage/place the island again. |
 | `DULUS_BAR_KEEP_WAYLAND=1` | Linux: stay on native Wayland (the compositor decides where the island goes). |
 | `DULUS_BAR_FULL_SCREEN_EDGE=1` | Linux: anchor to the physical screen edge, ignoring panels/docks. |
@@ -304,7 +315,8 @@ Most settings live in the menu (**Settings**). Environment variables still win:
 
 PRs welcome — new agent icons/colors, integrations, platform fixes, packaging.
 `pip install -e ".[dev]" && pytest` runs the suite (headless; the UI tests use
-Qt's offscreen platform). Open an issue, fork it, ship it.
+Qt's offscreen platform); on a Mac, `swift test --package-path dulus_bar/macos`
+runs the native island's. Open an issue, fork it, ship it.
 
 ## License
 
