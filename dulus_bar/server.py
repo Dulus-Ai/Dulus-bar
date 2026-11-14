@@ -39,7 +39,17 @@ HOUSEKEEPING_SECONDS = 5.0
 STALE_AFTER_SECONDS = 30 * 60
 # Hub-generated event types a client is not allowed to forge.
 _HUB_ONLY = frozenset({
-    P.DISCONNECTED, P.SESSION_REMOVED, P.REQUEST_RESOLVED, P.SNAPSHOT, P.WELCOME,
+    P.DISCONNECTED, P.SESSION_REMOVED, P.REQUEST_RESOLVED, P.SNAPSHOT, P.WELCOME, P.NATIVE,
+})
+# What a wrapper only knows from scraping the agent's screen, by what the
+# agent can take over. Once the agent reports that itself, the scraped version
+# is noise: a second card for the same prompt, status lines fighting its own.
+_SCRAPED = {
+    "permissions": frozenset({P.TOOL_REQUEST, P.TOOL_APPROVED, P.TOOL_DENIED}),
+    "status": frozenset({P.MESSAGE, P.COMPLETED}),
+}
+_STATUS = frozenset({
+    P.SESSION_STARTED, P.PROMPT, P.TOOL_STARTED, P.TOOL_FINISHED, P.MESSAGE, P.IDLE, P.COMPLETED, P.ERROR,
 })
 
 
@@ -82,6 +92,7 @@ class _Peer:
     role: str = P.ROLE_AGENT
     authed: bool = False
     ephemeral: bool = False  # one-shot clients (hooks, CLI): a disconnect ends nothing
+    wrapper: bool = False    # `dulusbar wrap`: reports what it scrapes off a screen
     client: str = ""
     owned: Set[Tuple[str, str]] = field(default_factory=set)
     requests: Set[str] = field(default_factory=set)
@@ -117,6 +128,8 @@ class AgentEventServer:
         self._shutdown_handlers: List[Callable[[], None]] = []
         self._peers: Dict[Any, _Peer] = {}
         self._owners: Dict[str, _Peer] = {}  # request_id -> the peer waiting on it
+        # Wrapped sessions -> what the agent reports itself ("permissions", "status").
+        self._native: Dict[Tuple[str, str], Set[str]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[asyncio.Event] = None
@@ -212,17 +225,46 @@ class AgentEventServer:
         event = AgentEvent.from_message(data)
         if not event.ts:
             event.ts = time.time()
+        key = (event.agent, event.session_id)
+        if peer.wrapper:
+            if any(kind in _SCRAPED[what] for what in self._native.get(key, ())):
+                return  # the agent reports this itself
+        else:
+            await self._adopt_native(peer, key, kind)
         if kind == P.TOOL_REQUEST and not self._claim_request(peer, event):
             return  # an old wrapper re-reporting the prompt that's already up
         if not peer.ephemeral:
-            peer.owned.add((event.agent, event.session_id))
+            peer.owned.add(key)
         resolved = self.store.apply(event)
+        if key not in self.store.sessions:
+            self._native.pop(key, None)
         self._emit(event)
         relayed = dict(data)
         relayed.update(event.to_message())
         await self._send_ui(relayed)
         for perm in resolved:
             await self._announce(perm, "answered", by="agent")
+
+    async def _adopt_native(self, peer: _Peer, key: Tuple[str, str], kind: str) -> None:
+        """An agent running under a wrapper reports its session itself (it
+        speaks the protocol): what it reports wins. Its own request takes over
+        permissions — the wrapper's scraped cards are withdrawn; its own
+        status takes over status. The wrapper is told to stop scraping that."""
+        what = "permissions" if kind == P.TOOL_REQUEST else "status" if kind in _STATUS else ""
+        if not what or what in self._native.get(key, ()):
+            return
+        wrappers = [p for p in self._peers.values() if p.wrapper and p is not peer and key in p.owned]
+        if not wrappers:
+            return
+        self._native.setdefault(key, set()).add(what)
+        for wrapper in wrappers:
+            if what == "permissions":
+                for request_id in list(wrapper.requests):
+                    perm = self.store.find_permission(request_id)
+                    if perm is not None and perm.key == key:
+                        self.store.resolve(request_id)
+                        await self._announce(perm, "cancelled", by="hub")
+            await self._send(wrapper, {"type": P.NATIVE, "agent": key[0], "session_id": key[1], "reports": what})
 
     def _claim_request(self, peer: _Peer, event: AgentEvent) -> bool:
         """Give the request an id and remember who is waiting on it."""
@@ -257,6 +299,7 @@ class AgentEventServer:
         peer.role = role
         peer.authed = authed
         peer.ephemeral = bool(data.get("ephemeral"))
+        peer.wrapper = role == P.ROLE_AGENT and bool(data.get("wrapper"))
         peer.client = str(data.get("client") or "")[:80]
         await self._send(peer, {
             "type": P.WELCOME,
@@ -383,6 +426,7 @@ class AgentEventServer:
 
     async def _remove(self, agent: str, session_id: str, kind: str) -> None:
         event = AgentEvent(agent=agent, event_type=kind, session_id=session_id, ts=time.time())
+        self._native.pop((agent, session_id), None)
         for perm in self.store.apply(event):
             await self._announce(perm, "cancelled", by="hub")
         self._emit(event)

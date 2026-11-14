@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -75,10 +76,44 @@ _TERMINAL_INPUT_RE = re.compile(
 # Agents whose approval prompt is a select list: Enter takes the highlighted
 # "Yes", Esc is "No". (Typing "n" + Enter there would pick the default: allow.)
 _MENU_AGENTS = ("claude", "codex", "gemini", "qwen")
+# Claude Code's dialog: "Do you want to proceed?" / "…make this edit to x?"
+_CLAUDE_PROMPT = re.compile(r"Do\s+you\s+want\s+to\s+(?:proceed|make\s+this\s+edit|create|allow)", re.I)
 
 
 def is_user_input(data: bytes) -> bool:
     return bool(_TERMINAL_INPUT_RE.sub(b"", data))
+
+
+def reports_through_hooks(command: List[str]) -> bool:
+    """``claude`` itself, with Dulus Bar's hooks installed: it reports
+    everything — status, model, context and Allow / Deny — so a wrapper would
+    only add a second, screen-scraped row. Decided by the command, not the
+    name: a script that's *called* "Claude something" isn't Claude Code."""
+    if not command or os.path.splitext(os.path.basename(command[0]))[0].lower() != "claude":
+        return False
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if "dulus_bar" not in sys.modules and root not in sys.path:
+        sys.path.insert(0, root)  # run as a loose script: use the package we ship in
+    try:
+        from dulus_bar.integrations import claude
+
+        return bool(claude.status().get("installed"))
+    except Exception:
+        return False
+
+
+def run_direct(command: List[str]) -> int:
+    """Run the agent as-is, attached to this terminal."""
+    exe = command[0]
+    if not os.path.isabs(exe) and not os.path.exists(exe):
+        exe = shutil.which(exe) or exe  # Windows only finds claude.cmd / .exe this way
+    try:
+        return subprocess.call([exe, *command[1:]])
+    except FileNotFoundError:
+        print(f"[dulus-bar] command not found: {command[0]}", file=sys.stderr)
+        return 127
+    except KeyboardInterrupt:
+        return 130
 
 
 class AgentWrapper:
@@ -104,8 +139,12 @@ class AgentWrapper:
         self.done_patterns = [
             re.compile(r"✓\s+Done"),
         ]
-        # Report permission prompts at all (off when the agent has real hooks).
+        # Report permission prompts at all (off when the agent has real hooks,
+        # or asks the island itself).
         self.detect_permissions = True
+        # Report status lines / "done" scraped off the screen (off once the
+        # agent reports its own status to the island).
+        self.report_status = True
         # What the island's answer types into the agent. Under a PTY, "\r" is
         # Enter for raw-mode TUIs (and becomes "\n" in cooked mode); pipes get
         # a plain newline. A "No" never presses Enter under a PTY: in a select
@@ -116,6 +155,8 @@ class AgentWrapper:
         self.answer_no_pipe = "n\n"
         if any(name in agent_name.lower() for name in _MENU_AGENTS):
             self.answer_yes_pty, self.answer_no_pty = "\r", "\x1b"
+        if "claude" in agent_name.lower():
+            self.permission_patterns.append(_CLAUDE_PROMPT)
         self._agent_stdin: Optional[asyncio.StreamWriter] = None
         self._pty_master: Optional[int] = None  # set when running under a PTY
         self._ws = None
@@ -173,6 +214,8 @@ class AgentWrapper:
     # --- output scanning -------------------------------------------------------
     async def _feed(self, ws, clean: str) -> None:
         """Scan new (ANSI-free) agent output for prompts, completion and status."""
+        if not (self.detect_permissions or self.report_status):
+            return
         self._scan = (self._scan + clean)[-4000:]
         self._scan_meta(self._scan)
         match = self._permission_match(self._scan) if self.detect_permissions else None
@@ -191,6 +234,8 @@ class AgentWrapper:
                 self._last_prompt_id = prompt_id
                 await self._send(ws, "tool_request", {"tool": prompt, "args": ""},
                                  request_id=self._pending_request)
+            return
+        if not self.report_status:
             return
         if self._looks_like_done(self._scan):
             self._scan = ""
@@ -231,6 +276,17 @@ class AgentWrapper:
         self._pending_request = None
         self._scan = ""
         self._quiet_until = time.monotonic() + PROMPT_GRACE
+
+    def _go_native(self, reports: str) -> None:
+        """The agent reports this to the island itself (it speaks the
+        protocol): its own requests / status beat anything scraped here."""
+        if reports in ("permissions", ""):
+            self.detect_permissions = False
+            self._pending_request = None  # the hub already withdrew its card
+        if reports in ("status", ""):
+            self.report_status = False
+            self._cancel_flush()
+        self._scan = ""
 
     def _user_typed(self) -> None:
         """Keys typed in the terminal answer a pending prompt there: withdraw
@@ -350,6 +406,9 @@ class AgentWrapper:
                     continue
                 kind = data.get("type")
                 request_id = data.get("request_id")
+                if kind == "native" and data.get("session_id") == self.session_id:
+                    self._go_native(str(data.get("reports") or ""))
+                    continue
                 if kind == "request_resolved" and request_id and request_id == self._pending_request:
                     self._prompt_settled()  # e.g. withdrawn by the hub
                     continue
@@ -374,6 +433,10 @@ class AgentWrapper:
         if not self.command:
             print("[dulus-bar] no command provided", file=sys.stderr)
             return 1
+        if reports_through_hooks(self.command):
+            print("[dulus-bar] Claude Code reports to the island through its hooks; running it directly.",
+                  file=sys.stderr)
+            return run_direct(self.command)
         # Interactive CLIs (claude, grok, gemini, codex…) refuse to boot their
         # UI without a real TTY — under plain pipes they just sit there or exit.
         # On POSIX with a terminal attached, run the agent under a PTY so it
@@ -623,7 +686,13 @@ class AgentWrapper:
         last_exc = None
         for i in range(attempts):
             try:
-                return await websockets.connect(EVENT_SERVER, open_timeout=2)
+                ws = await websockets.connect(EVENT_SERVER, open_timeout=2)
+                # Say we're a wrapper, so the agent's own reports can win over
+                # what we scrape. Older hubs take this for a health probe.
+                await self._send_raw(ws, {"type": "hello", "v": 2, "role": "agent", "wrapper": True,
+                                          "client": "dulus-bar-wrapper", "agent": "_health",
+                                          "session_id": "_health"})
+                return ws
             except Exception as exc:
                 last_exc = exc
                 await asyncio.sleep(delay)
