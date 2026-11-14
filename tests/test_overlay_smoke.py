@@ -45,10 +45,11 @@ def app():
 
 
 @pytest.fixture
-def island(app, tmp_path):
+def island(app, tmp_path, monkeypatch):
     from dulus_bar import overlay
     from dulus_bar.config import Settings
 
+    monkeypatch.setattr(overlay, "ARM_DELAY_MS", 0)  # buttons live at once; see test_new_cards_arm
     hub = FakeHub()
     window = overlay.DulusBarOverlay(hub, Settings(tmp_path / "config.json"))
     window.show()
@@ -73,12 +74,13 @@ def test_permission_queue_and_decisions(island):
     assert window.toast_visible and window.current_permission.request_id == "r1"
     assert window.toast_counter.text() == "1 of 2" and not window.toast_counter.isHidden()
     assert not window.always_btn.isHidden() and window.toast_code.text() == "rm -rf build/"
+    assert window.toast_hint.text() == "Always allow · Bash(rm:*)" and not window.toast_hint.isHidden()
     assert window.count_badge.text() == "2"
 
     window.always_btn.click()
     assert hub.decisions == [("r1", True, True)]
     assert window.current_permission.request_id == "r2"
-    assert window.always_btn.isHidden() and window.toast_code.isHidden()
+    assert window.always_btn.isHidden() and window.toast_code.isHidden() and window.toast_hint.isHidden()
 
     window.deny_btn.click()
     assert hub.decisions[-1] == ("r2", False, False)
@@ -139,3 +141,32 @@ def test_long_commands_wrap_and_the_card_grows_to_fit(island):
     metrics = overlay.QtGui.QFontMetrics(window.toast_code.font())
     assert max(metrics.horizontalAdvance(line) for line in lines) <= overlay.TOAST_WIDTH - 28 - 32 - 22
     assert window.toast.height() >= window.toast.heightForWidth(overlay.TOAST_WIDTH)
+
+
+def test_new_cards_arm_before_they_take_a_click(island, monkeypatch):
+    """A double-click on Allow must not answer the next request in the queue."""
+    from PySide6.QtTest import QTest
+
+    from dulus_bar import overlay
+
+    window, hub = island
+    monkeypatch.setattr(overlay, "ARM_DELAY_MS", 120)
+    window._handle_event(ev("tool_request", request_id="r1", tool="Bash", args="ls"))
+    window._handle_event(ev("tool_request", session="s2", request_id="r2", tool="Bash", args="rm -rf /"))
+    window.allow_btn.click()  # the card is brand new: not armed yet
+    assert hub.decisions == []
+    QTest.qWait(200)
+    window.allow_btn.click()
+    window.allow_btn.click()  # the double-click's second half lands on r2's fresh card
+    assert hub.decisions == [("r1", True, False)]
+    assert window.current_permission.request_id == "r2"
+
+
+def test_text_that_hides_part_of_a_command_is_made_visible(island):
+    window, _ = island
+    # U+202E (right-to-left override) makes "rm -rf ~/x" *display* reversed.
+    window._handle_event(ev("tool_request", request_id="r1", tool="Bash\u202e",
+                            args="x", detail="echo hi \u202ex/~ fr- mr\r\nok"))
+    assert "⟨U+202E⟩" in window.toast_code.text() and "\u202e" not in window.toast_code.text()
+    assert window.toast_code.text().splitlines()[-1] == "ok"  # CRLF is just a line break
+    assert window.toast_body.text() == "Bash⟨U+202E⟩"

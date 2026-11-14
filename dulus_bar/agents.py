@@ -8,6 +8,7 @@ the UI still looks intentional. It is presentation-only.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -68,6 +69,14 @@ _FALLBACK_PALETTE = (
 )
 
 
+def _mentions(alias: str, name: str) -> bool:
+    """``alias`` appears in ``name``. Short ones ("cn", "amp", "zed", "gpt"…)
+    must be a whole word: "Example Agent" is not Amp, "Organized" is not Zed."""
+    if len(alias) > 3:
+        return alias in name
+    return re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", name) is not None
+
+
 def style_for(agent_name: str) -> AgentStyle:
     """Return an AgentStyle for any agent name (never raises)."""
     name = (agent_name or "").strip()
@@ -75,7 +84,7 @@ def style_for(agent_name: str) -> AgentStyle:
     if low in _BY_ALIAS:
         return _BY_ALIAS[low]
     for alias, style in _BY_ALIAS.items():
-        if alias in low:
+        if _mentions(alias, low):
             return style
     # Deterministic fallback color from the name.
     idx = sum(ord(c) for c in low) % len(_FALLBACK_PALETTE) if low else 0
@@ -89,6 +98,18 @@ def style_for(agent_name: str) -> AgentStyle:
 
 def is_dulus(agent_name: str) -> bool:
     return style_for(agent_name).key == "dulus"
+
+
+def readable_accent(color: str) -> str:
+    """``color`` (#rrggbb), mixed 60% toward white when its luminance is below
+    0.4: Grok's near-black and Ollama's black vanish on the dark island."""
+    try:
+        red, green, blue = (int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return color
+    if (0.299 * red + 0.587 * green + 0.114 * blue) / 255 >= 0.4:
+        return color
+    return "#" + "".join(f"{round(c + (255 - c) * 0.6):02x}" for c in (red, green, blue))
 
 
 # CLI executable names for known agents, used by "quick launch" in the UI.

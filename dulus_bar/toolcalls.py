@@ -109,5 +109,10 @@ def describe_suggestions(suggestions: Any) -> str:
             for directory in suggestion.get("directories") or []:
                 rules.append(f"files in {os.path.basename(str(directory).rstrip('/')) or directory}")
         elif suggestion.get("type") == "setMode" and suggestion.get("mode"):
-            rules.append(f"mode: {suggestion['mode']}")
+            mode = str(suggestion["mode"])
+            rules.append(_MODES.get(mode, f"mode: {mode}"))
     return one_line(", ".join(rules), 120)
+
+
+# Claude Code permission modes, as the "Always allow" hint reads them.
+_MODES = {"acceptEdits": "all edits", "bypassPermissions": "everything", "plan": "plan mode"}
