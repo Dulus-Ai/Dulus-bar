@@ -11,6 +11,9 @@ final class WebSocketClient {
     private var socket: URLSessionWebSocketTask?
     private var worker: Task<Void, Never>?
     private var stopped = false
+    /// Reconnect delay; back to the minimum as soon as the hub welcomes us.
+    private var backoff = WebSocketClient.minimumBackoff
+    private static let minimumBackoff = 0.35
 
     /// `token` is the per-run hub token: only an authenticated island may
     /// answer a request. It arrives in the environment, never on argv.
@@ -74,7 +77,6 @@ final class WebSocketClient {
     }
 
     private func connectionLoop() async {
-        var delay: Double = 0.35
         while !stopped && !Task.isCancelled {
             let task = URLSession.shared.webSocketTask(with: url)
             socket = task
@@ -83,7 +85,6 @@ final class WebSocketClient {
 
             do {
                 try await receiveMessages(from: task)
-                delay = 0.35
             } catch {
                 if stopped || Task.isCancelled { break }
             }
@@ -93,11 +94,11 @@ final class WebSocketClient {
             model.setConnected(false)
 
             do {
-                try await Task.sleep(for: .seconds(delay))
+                try await Task.sleep(for: .seconds(backoff))
             } catch {
                 break
             }
-            delay = min(delay * 1.8, 4.0)
+            backoff = min(backoff * 1.8, 4.0)
         }
     }
 
@@ -120,6 +121,8 @@ final class WebSocketClient {
         guard let envelope = try? decoder.decode(Envelope.self, from: data) else { return }
         switch envelope.type {
         case "welcome":
+            backoff = Self.minimumBackoff
+            if let hostID = envelope.hostID { model.hostID = hostID }
             model.setConnected(true)
         case "snapshot":
             if let snapshot = try? decoder.decode(Snapshot.self, from: data) { model.load(snapshot) }
