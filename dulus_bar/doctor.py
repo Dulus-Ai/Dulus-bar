@@ -101,13 +101,13 @@ def _macos() -> int:
         _line(OK, "pyobjc", "present")
     except Exception:
         _line(INFO, "pyobjc", "missing — the Qt fallback won't hug the notch")
-    binary = macos_native.native_binary()
     if macos_native.native_available():
-        stale = macos_native.native_stale()
-        _line(WARN if stale else OK, "native island",
-              "built, but older than its sources (rebuilt on next start)" if stale else str(binary))
-    elif shutil.which("swift"):
-        _line(INFO, "native island", "not built yet (built automatically on first start)")
+        _line(OK, "native island", str(macos_native.native_binary()))
+    elif os.environ.get("DULUS_BAR_NATIVE_BINARY"):
+        _line(BAD, "native island", f"DULUS_BAR_NATIVE_BINARY is not an executable: {macos_native.native_binary()}")
+        return 1
+    elif macos_native.swift_toolchain():
+        _line(INFO, "native island", "not built yet — built on the next start (about a minute)")
     else:
         _line(INFO, "native island", "no Swift toolchain — using the Qt island (xcode-select --install)")
     return 0

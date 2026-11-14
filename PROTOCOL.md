@@ -44,6 +44,8 @@ The first message may identify the client:
 * `ephemeral` — `true` for clients that connect once per event (hooks, scripts).
   When a non-ephemeral agent socket closes, the hub ends the sessions it reported
   (`disconnected`); an ephemeral one can come and go freely.
+* `wrapper` — `true` for `dulusbar wrap`: what it reports is scraped off the
+  agent's screen. See [Running under a wrapper](#running-under-a-wrapper).
 * `agent: "_health"` makes a v1 hub treat the hello as a health probe instead
   of a session called "unknown".
 
@@ -95,10 +97,30 @@ Optional metadata on **any** event, shown next to the agent name:
 `pid_host` is `f"{sys.platform}:{socket.gethostname()}"`; the hub ignores pids
 from a different host (WSL is not Windows).
 
-**Running under a wrapper?** `dulusbar wrap` exports `DULUS_BAR_AGENT` and
-`DULUS_BAR_SESSION_ID` to the agent it launches. Report with that agent name
-and session id (`BarClient()` picks them up by default) and your events — exact
-model, context, tool calls — land in the wrapper's row instead of a second one.
+### Running under a wrapper
+
+`dulusbar wrap` exports `DULUS_BAR_AGENT` and `DULUS_BAR_SESSION_ID` to the
+agent it launches. Report with that agent name and session id (`BarClient()`
+picks them up by default) and your events — exact model, context, tool calls —
+land in the wrapper's row instead of a second one.
+
+What you report yourself then wins over the wrapper's screen-scraping, one
+aspect at a time:
+
+* **permissions** — your first `tool_request` for the session withdraws the
+  wrapper's scraped cards for it (`request_resolved`, `outcome: cancelled`),
+  and from then on its scraped `tool_request`s (and `tool_approved` /
+  `tool_denied`) are dropped. One prompt is one card — yours — even though
+  your terminal prompt is still on screen.
+* **status** — your first status event (`session_started`, `prompt`,
+  `tool_started`, `tool_finished`, `message`, `idle`, `completed`, `error`)
+  does the same for its scraped `message` / `completed` lines.
+
+Report only your model and context, and the wrapper still brings your
+terminal prompts to the island. The hub tells the wrapper each time —
+`{"type": "native", "agent": …, "session_id": …, "reports": "permissions" | "status"}`
+— so it stops scraping that. It keeps owning the session either way: its
+pid, and ending it when the agent exits.
 
 ### Permission requests
 
@@ -127,6 +149,41 @@ The answer goes **only to the socket that asked**:
 ```
 
 v1 clients that ignore `request_id` and match on `session_id` keep working.
+
+### Always allow
+
+The island offers **Always allow** only on requests that say `can_always: true`
+— on macOS by holding **Allow** (or right-clicking it), on Windows / Linux with
+its own button. The island keeps no rules and never answers anything on its
+own: "always" is a rule **the agent** saves in its own permission settings.
+If you can't save one, don't offer it.
+
+1. Ask with `can_always: true` and an `always_label` that says what the rule
+   will allow, in your own words — `Bash(npm test:*)`, `edits in src/`,
+   `this MCP server`. The island shows it ("Hold Allow to always allow · …").
+2. A decision with `"always": true` (it only ever comes with `"approved": true`)
+   means: allow this call **and** save that rule.
+3. Don't ask again for calls the rule covers — that's the whole point.
+
+With the SDK:
+
+```python
+decision = bar.request_permission(
+    "Bash", "npm test", detail="npm test",
+    can_always=True, always_label="Bash(npm test:*)",
+)
+if decision is None:
+    ...  # answered in the terminal, or the island went away: use your own prompt
+elif decision.approved:
+    if decision.always:
+        settings.allow("Bash", "npm test:*")  # your settings — the island stores nothing
+    run_it()
+else:
+    ...  # denied (decision.message may say why)
+```
+
+Claude Code's hooks map this onto Claude's own "don't ask again" suggestions,
+so *Always allow* on the island writes the same rule its terminal dialog would.
 
 A request can also end without a decision. Islands then get
 `{"type": "request_resolved", "request_id": …, "payload": {"outcome": …}}` and

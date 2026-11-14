@@ -5,15 +5,27 @@
 # launched agents re-invoke it, so no separate Python is needed).
 import sys
 
+# The bird: tray icon, window icon and the island's brand mark.
+datas = [('dulus_bar/assets/dulus-bird.png', 'dulus_bar/assets')]
+if sys.platform == 'darwin':
+    # The native notch island's sources, built on first start when the Xcode
+    # Command Line Tools are there (the Qt island is used otherwise). Tests
+    # too: SwiftPM refuses a package whose test target has no folder.
+    datas += [
+        ('dulus_bar/macos/Package.swift', 'dulus_bar/macos'),
+        ('dulus_bar/macos/Sources', 'dulus_bar/macos/Sources'),
+        ('dulus_bar/macos/Tests', 'dulus_bar/macos/Tests'),
+    ]
+
 a = Analysis(
     ['dulus_bar/main.py'],
     pathex=[],
     binaries=[],
-    # The bird: tray icon, window icon and the island's brand mark.
-    datas=[('dulus_bar/assets/dulus-bird.png', 'dulus_bar/assets')],
+    datas=datas,
     # Imported lazily (per platform / per command), so list them explicitly.
     hiddenimports=[
         'dulus_bar.overlay',
+        'dulus_bar.macos_native',
         'dulus_bar.doctor',
         'dulus_bar.integrations.claude',
         'dulus_bar.integrations.codex',

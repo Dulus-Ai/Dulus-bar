@@ -16,11 +16,11 @@ echo "[setup] installing dependencies..."
 chmod +x "$ROOT/dulusbar" || true
 
 # macOS gets a native SwiftUI/AppKit notch surface. Python remains the agent
-# event hub; PyQt is retained as a safe fallback and for Windows/Linux.
+# event hub; the Qt island is kept as a safe fallback and for Windows/Linux.
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  if command -v swift >/dev/null 2>&1; then
+  if command -v swift >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
     echo "[setup] building native macOS notch surface..."
-    swift build -c release --package-path "$ROOT/macos"
+    PYTHONPATH="$ROOT:${PYTHONPATH:-}" "$PY" -m dulus_bar.macos_native
   else
     echo "[setup] warning: Swift toolchain not found; macOS will use the Qt fallback."
     echo "[setup] install Xcode Command Line Tools with: xcode-select --install"

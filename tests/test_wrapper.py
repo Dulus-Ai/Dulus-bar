@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import os
+
+import pytest
 
 from dulus_bar.wrappers import base_wrapper as bw
 from dulus_bar.wrappers.base_wrapper import AgentWrapper
@@ -205,3 +208,70 @@ def test_the_next_question_right_after_an_answer_is_not_mistaken_for_an_echo():
     sent = asyncio.run(scenario()).sent
     prompts = [m["payload"]["tool"] for m in sent if m["type"] == "tool_request"]
     assert len(prompts) == 2 and "Push to origin?" in prompts[1]
+
+
+def test_a_wrapper_stops_scraping_what_the_agent_reports_itself():
+    async def scenario():
+        w = AgentWrapper("Dulus", ["dulus"])
+        ws = FakeWS()
+
+        def native(what):
+            return FakeWS([{"type": "native", "agent": "Dulus", "session_id": w.session_id, "reports": what}])
+
+        await w._listen_decisions(native("status"))
+        await w._feed(ws, "some status line\n✓ Done\n")  # status: the agent reports its own
+        await w._feed(ws, "Allow this action? (Y/n)\n")   # prompts: still the wrapper's job
+        await w._listen_decisions(native("permissions"))
+        await w._feed(ws, "Allow this action? (Y/n)\n")
+        return w, ws
+
+    w, ws = asyncio.run(scenario())
+    assert ws.kinds() == ["tool_request"]
+    assert not (w.report_status or w.detect_permissions) and w._pending_request is None
+
+
+def _fake_claude(tmp_path, code=3):
+    exe = tmp_path / "bin" / "claude"
+    exe.parent.mkdir()
+    exe.write_text(f"#!/bin/sh\nexit {code}\n")
+    exe.chmod(0o755)
+    return exe
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell stand-in for claude")
+def test_claude_code_with_hooks_runs_directly(monkeypatch, tmp_path):
+    """`dulusbar wrap "Claude Code" -- claude` with the hooks installed: the
+    hooks report everything, so a wrapper would only add a duplicate row."""
+    from dulus_bar.integrations import claude
+
+    claude_exe = _fake_claude(tmp_path)
+    connects = []
+
+    async def never(*a, **k):
+        connects.append(a)
+
+    monkeypatch.setattr(AgentWrapper, "_connect_with_retry", never)
+    claude.install()
+    assert asyncio.run(AgentWrapper("Claude Code", [str(claude_exe), "--resume"]).run()) == 3
+    assert connects == []  # ran as-is: no island connection, no PTY
+    # By the command, not the name: these aren't Claude Code itself.
+    assert not bw.reports_through_hooks(["/home/kev/claude-agent.py"])
+    assert not bw.reports_through_hooks(["ssh", "box", "claude"])
+    assert bw.reports_through_hooks(["claude.exe"]) and bw.reports_through_hooks(["claude.cmd", "-c"])
+    claude.uninstall()
+    assert not bw.reports_through_hooks([str(claude_exe)])
+
+
+def test_running_directly_finds_the_command_on_path(monkeypatch):
+    """Windows only finds npm's claude.cmd through a PATH lookup."""
+    calls = []
+    monkeypatch.setattr(bw.shutil, "which", lambda name: r"C:\npm\claude.cmd" if name == "claude" else None)
+    monkeypatch.setattr(bw.subprocess, "call", lambda argv: calls.append(argv) or 0)
+    assert bw.run_direct(["claude", "-p", "hi"]) == 0
+    assert calls == [[r"C:\npm\claude.cmd", "-p", "hi"]]
+
+
+def test_claude_prompts_are_detected_by_any_claude_wrapper():
+    w = AgentWrapper("Claude Code", ["claude"])
+    assert w._looks_like_permission("Bash command\n  npm test\nDo you want to proceed?\n❯ 1. Yes")
+    assert not AgentWrapper("Codex", ["codex"])._looks_like_permission("Do you want to proceed?")

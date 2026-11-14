@@ -54,13 +54,13 @@ def _launched_from_console() -> bool:
         return False
 
 
-def _relaunch_detached() -> bool:
+def _relaunch_detached(extra_env: Optional[Dict[str, str]] = None) -> bool:
     """Relaunch in the background with no console. Returns True on success."""
     import subprocess
 
     from .integrations import self_argv
 
-    env = dict(os.environ, DULUS_BAR_DETACHED="1")
+    env = dict(os.environ, DULUS_BAR_DETACHED="1", **(extra_env or {}))
     argv = self_argv("run")
     try:
         if os.name == "nt":
@@ -88,6 +88,30 @@ def _port_open(port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _prebuild_native() -> Dict[str, str]:
+    """macOS, launched from a terminal: build the native island here, before
+    detaching. The first build takes about a minute — better watched than
+    spent behind a background launch with nothing on screen. Returns env for
+    the detached copy (which skips building if it failed here)."""
+    from . import macos_native
+
+    if not macos_native.should_use_native() or macos_native.native_available():
+        return {}
+    if os.environ.get("DULUS_BAR_NATIVE_BINARY") or os.environ.get("DULUS_BAR_NATIVE_AUTOBUILD") == "0":
+        return {}
+    if macos_native.swift_toolchain() is None:
+        print("[dulusbar] no Swift toolchain: using the Qt island. For the native notch island, "
+              "install the Xcode Command Line Tools (xcode-select --install).", file=sys.stderr)
+        return {"DULUS_BAR_NATIVE_AUTOBUILD": "0"}
+    print("[dulusbar] building the native macOS island (first run only, about a minute)…", file=sys.stderr)
+    try:
+        macos_native.build_native()
+    except Exception as exc:
+        print(f"[dulusbar] the native build failed ({exc}); using the Qt island.", file=sys.stderr)
+        return {"DULUS_BAR_NATIVE_AUTOBUILD": "0"}
+    return {}
 
 
 def _run_ui() -> int:
@@ -126,7 +150,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     foreground = (getattr(args, "foreground", False) or getattr(args, "foreground_top", False)
                   or _env_on("DULUS_BAR_FOREGROUND"))
     if not foreground and os.environ.get("DULUS_BAR_DETACHED") != "1" and _launched_from_console():
-        if _relaunch_detached():
+        if _relaunch_detached(_prebuild_native()):
             return 0  # the detached copy took over — free this terminal
     return _run_ui()
 

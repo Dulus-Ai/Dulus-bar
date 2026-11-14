@@ -33,12 +33,13 @@ from PySide6.QtWidgets import (
 
 from . import autostart, native
 from . import protocol as P
-from .agents import detect_installed, style_for
+from .agents import detect_installed, readable_accent, style_for
 from .config import Settings
 from .integrations import python_console
 from .protocol import AgentEvent
 from .server import AgentEventServer
 from .state import Permission, Session, SessionStore, call_text, one_line
+from .text import reveal_hidden
 
 APP_NAME = "Dulus Bar"
 WS_PORT = P.DEFAULT_PORT
@@ -83,6 +84,10 @@ HOVER_DWELL_MS = 350   # ms of intentional hover required before expanding
 BRIEF_REVEAL_MS = 2600  # how long a finished / failed agent peeks the island open
 TOP_MARGIN = 8         # gap between the screen/work-area top and the pill
 NOTIFY_COOLDOWN_S = 8.0  # per session, so a chatty agent can't spam the desktop
+# A new card's buttons wake up after this long, so the second click of a
+# double-click (or a click already on its way) can't answer a request you
+# haven't seen yet — the queue slides the next one in right away.
+ARM_DELAY_MS = 350
 
 STATUS_COLORS = {
     "running": GOOD,
@@ -146,7 +151,7 @@ def _meta_html(session: Session, accent: str) -> str:
     """``model · ctx`` for agents that report them (Dulus, Claude Code…)."""
     bits = []
     if session.model:
-        bits.append(f"<span style='color:{accent};'>{_esc(session.model)}</span>")
+        bits.append(f"<span style='color:{readable_accent(accent)};'>{_esc(session.model)}</span>")
     if session.ctx:
         bits.append(f"<span style='color:{_ctx_color(session.ctx)};'>ctx {_esc(session.ctx)}</span>")
     return " · ".join(bits)
@@ -709,11 +714,23 @@ class DulusBarOverlay(QMainWindow):
         btns.addWidget(self.allow_btn)
         t.addLayout(btns)
 
+        # What "Always allow" would save, said up front rather than in a tooltip.
+        self.toast_hint = QLabel("")
+        self.toast_hint.setTextFormat(Qt.TextFormat.PlainText)  # agent-supplied
+        self.toast_hint.setFont(QFont(FONT_FAMILY, 8))
+        self.toast_hint.setStyleSheet(f"color: {TEXT_FAINT}; background: transparent;")
+        self.toast_hint.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.toast_hint.setVisible(False)
+        t.addWidget(self.toast_hint)
+
         self.deny_btn.clicked.connect(lambda: self._resolve_permission(False))
         self.always_btn.clicked.connect(lambda: self._resolve_permission(True, always=True))
         self.allow_btn.clicked.connect(lambda: self._resolve_permission(True))
         # Deliberately mouse-only, and never activated on show: a card that
         # grabbed focus could turn the Enter you were typing into an "Allow".
+        self._arm_timer = QTimer(self.toast)
+        self._arm_timer.setSingleShot(True)
+        self._arm_timer.timeout.connect(lambda: self._set_buttons_armed(True))
 
         toast_shadow = QGraphicsDropShadowEffect(card)
         toast_shadow.setBlurRadius(24)
@@ -872,16 +889,20 @@ class DulusBarOverlay(QMainWindow):
         )
         # Wrapper requests carry raw terminal text as the "tool", hooks a clean
         # tool name plus a detail block (the full command, a diff excerpt…).
-        detail = perm.detail.strip() or perm.args.strip()
+        detail = reveal_hidden(perm.detail.strip() or perm.args.strip())
+        tool = reveal_hidden(perm.tool) or "Run a tool?"
         if detail:
-            self.toast_body.setText(_elide(perm.tool or "Run a tool?", 90))
+            self.toast_body.setText(_elide(tool, 90))
             self.toast_code.setText(self._wrap_code(detail))
             self.toast_code.setVisible(True)
         else:
-            self.toast_body.setText(_elide(perm.tool or "Run a tool?", 220))
+            self.toast_body.setText(_elide(tool, 220))
             self.toast_code.setVisible(False)
         self.always_btn.setVisible(perm.can_always)
         self.always_btn.setToolTip(_esc(f"Don't ask again for {perm.always_label}") if perm.always_label else "")
+        label = reveal_hidden(perm.always_label)
+        self.toast_hint.setText(_elide(f"Always allow · {label}", 70) if label else "")
+        self.toast_hint.setVisible(perm.can_always and bool(label))
         self._update_counter()
         # Size for the card's real width: adjustSize() measures at the
         # layout's preferred width and clipped long commands. Re-run both
@@ -895,6 +916,13 @@ class DulusBarOverlay(QMainWindow):
         self.toast.raise_()
         self.toast_visible = True
         self._position_toast()
+        self._set_buttons_armed(ARM_DELAY_MS <= 0)
+        if ARM_DELAY_MS > 0:
+            self._arm_timer.start(ARM_DELAY_MS)
+
+    def _set_buttons_armed(self, armed: bool) -> None:
+        for button in (self.deny_btn, self.always_btn, self.allow_btn):
+            button.setEnabled(armed)
 
     # Visual lines the code block shows before it says how much is left.
     CODE_MAX_LINES = 10

@@ -38,3 +38,18 @@ def test_always_allow_label_comes_from_the_suggestions():
     ]
     assert describe_suggestions(suggestions) == "Bash(npm test:*), files in other"
     assert describe_suggestions(None) == ""
+
+
+def test_mode_suggestions_read_like_what_they_allow():
+    assert describe_suggestions([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]) == "all edits"
+    assert describe_suggestions([{"type": "setMode", "mode": "someNewMode"}]) == "mode: someNewMode"
+
+
+def test_hidden_characters_are_revealed():
+    from dulus_bar.text import reveal_hidden
+
+    assert reveal_hidden("a\u202eb\u2066c") == "a⟨U+202E⟩b⟨U+2066⟩c"
+    assert reveal_hidden("echo hi\rrm -rf ~") == "echo hi⟨U+000D⟩rm -rf ~"  # \r would overwrite the line
+    assert reveal_hidden("x\x1b[2Ky") == "x⟨U+001B⟩[2Ky"
+    assert reveal_hidden("line 1\r\nline 2\tend") == "line 1\nline 2\tend"
+    assert reveal_hidden("ünïcode 👍") == "ünïcode 👍" and reveal_hidden(None) == ""

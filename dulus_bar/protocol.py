@@ -50,6 +50,8 @@ DISCONNECTED = "disconnected"        # a long-lived agent socket dropped
 SESSION_REMOVED = "session_removed"  # housekeeping: process gone / stale
 REQUEST_RESOLVED = "request_resolved"
 SNAPSHOT = "snapshot"
+# Hub -> wrapper: the agent it wraps reports that session itself now
+NATIVE = "native"
 # UI -> hub -> agent
 DECISION = "decision"
 # Control

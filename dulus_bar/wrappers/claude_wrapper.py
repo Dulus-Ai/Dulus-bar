@@ -13,9 +13,7 @@ included — so this just runs ``claude`` instead of adding a duplicate session.
 
 import asyncio
 import os
-import re
 import shutil
-import subprocess
 import sys
 
 # Add repo root to path so base_wrapper can be imported
@@ -34,28 +32,12 @@ def resolve_claude() -> str:
     return "claude"
 
 
-def hooks_installed() -> bool:
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
-        from dulus_bar.integrations import claude as integration
-
-        return bool(integration.status().get("installed"))
-    except Exception:
-        return False
-
-
 async def main() -> int:
-    command = [resolve_claude(), *sys.argv[1:]]
-    if hooks_installed():
-        return subprocess.call(command)
-    agent = AgentWrapper("Claude Code", command)
+    agent = AgentWrapper("Claude Code", [resolve_claude(), *sys.argv[1:]])
     # Claude Code's dialog is a menu: Enter takes the default "Yes", Esc is "No".
     agent.answer_yes_pty = agent.answer_yes_pipe = "\r"
     agent.answer_no_pty = agent.answer_no_pipe = "\x1b"
-    agent.permission_patterns.append(
-        re.compile(r"Do\s+you\s+want\s+to\s+(?:proceed|make\s+this\s+edit|create|allow)", re.I)
-    )
-    return await agent.run()
+    return await agent.run()  # runs claude directly when its hooks are installed
 
 
 if __name__ == "__main__":

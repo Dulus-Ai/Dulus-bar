@@ -14,7 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         configureBranding()
         configureStatusItem()
-        panelController = PanelController(model: model)
+        let metrics = NotchMetrics.preferredScreen().map { NotchMetrics.detect(on: $0) }
+            ?? NotchMetrics(width: 184, height: 24, screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        panelController = PanelController(model: model, screen: ScreenModel(metrics: metrics))
+        model.focusSession = { [weak self] session in self?.focus(session) }
 
         let url = Self.webSocketURL()
         let token = ProcessInfo.processInfo.environment["DULUS_BAR_TOKEN"] ?? ""
@@ -30,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         parentTimer?.invalidate()
         webSocket?.stop()
+    }
+
+    private func focus(_ session: Session) {
+        guard let pid = model.localPID(of: session) else { return }
+        TerminalFocus.focus(pid: pid)
     }
 
     private func configureBranding() {
@@ -56,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Show island", action: #selector(showIsland), keyEquivalent: "")
         menu.addItem(withTitle: "Open Dulus", action: #selector(openDulus), keyEquivalent: "")
         menu.addItem(makeAgentMenuItem())
+        menu.addItem(.separator())
+        if Launch.cli([]) != nil {
+            menu.addItem(withTitle: "Connect Claude Code…", action: #selector(connectClaude), keyEquivalent: "")
+        }
         menu.addItem(withTitle: "Open Dulus Bar folder", action: #selector(openProjectFolder), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Dulus Bar", action: #selector(quitApplication), keyEquivalent: "q")
@@ -82,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var found = false
         for (title, command) in agents where executableExists(command) {
             let item = NSMenuItem(title: title, action: #selector(openKnownAgent(_:)), keyEquivalent: "")
-            item.representedObject = command
+            item.representedObject = [title, command]
             item.target = self
             submenu.addItem(item)
             found = true
@@ -111,12 +123,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDulus() {
-        launchInTerminal(command: "dulus")
+        launchInTerminal(Launch.dulus())
     }
 
     @objc private func openKnownAgent(_ sender: NSMenuItem) {
-        guard let command = sender.representedObject as? String else { return }
-        launchInTerminal(command: command)
+        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
+        launchInTerminal(Launch.wired(pair[0], [pair[1]]))
     }
 
     @objc private func chooseAgent() {
@@ -126,20 +138,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker.canChooseFiles = true
         picker.canChooseDirectories = false
         picker.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)  // an accessory app's panel would open behind everything
         guard picker.runModal() == .OK, let url = picker.url else { return }
-        launchInTerminal(command: shellQuote(url.path))
+        launchInTerminal(Launch.wired(url.deletingPathExtension().lastPathComponent, [url.path]))
     }
 
-    private func launchInTerminal(command: String) {
-        let script = "tell application \"Terminal\" to do script \(String(reflecting: command))\ntell application \"Terminal\" to activate"
+    private func launchInTerminal(_ argv: [String]) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", script]
+        task.arguments = ["-e", Launch.terminalScript(argv)]
         try? task.run()
     }
 
-    private func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    /// `dulusbar hooks install claude`, with the outcome in an alert.
+    @objc private func connectClaude() {
+        guard let argv = Launch.cli(["hooks", "install", "claude"]) else { return }
+        Task.detached {
+            let task = Process()
+            let output = Pipe()
+            task.executableURL = URL(fileURLWithPath: argv[0])
+            task.arguments = Array(argv.dropFirst())
+            task.standardOutput = output
+            task.standardError = output
+            var text: String
+            var succeeded = false
+            do {
+                try task.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                task.waitUntilExit()
+                text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                succeeded = task.terminationStatus == 0
+            } catch {
+                text = error.localizedDescription
+            }
+            let message = text
+            let ok = succeeded
+            await MainActor.run {
+                let alert = NSAlert()
+                alert.messageText = ok ? "Claude Code is connected" : "Couldn't connect Claude Code"
+                alert.informativeText = message
+                alert.alertStyle = ok ? .informational : .warning
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
     }
 
     @objc private func openProjectFolder() {

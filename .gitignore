@@ -8,6 +8,8 @@ __pycache__/
 build/
 dist/
 macos/.build/
+dulus_bar/macos/.build/
+dulus_bar/macos/.swiftpm/
 *.egg-info/
 .pytest_cache/
 .venv/

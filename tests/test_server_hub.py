@@ -330,3 +330,93 @@ def test_port_in_use_is_reported_not_raised():
         assert isinstance(second.error, OSError)
     finally:
         first.stop()
+
+
+async def connect_wrapper(url):
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "hello", "v": 2, "role": "agent", "wrapper": True,
+                              "agent": "_health", "session_id": "_health"}))
+    await recv_type(ws, "welcome")
+    return ws
+
+
+def test_an_agent_that_asks_itself_wins_over_its_wrapper(hub):
+    """Dulus speaking the protocol while it runs under `dulusbar wrap`: one
+    card per prompt (its own), not a second one scraped off the terminal."""
+    server, url = hub
+
+    async def scenario():
+        ui, _, _ = await connect_ui(url)
+        wrapper = await connect_wrapper(url)
+        await wrapper.send(event("session_started", session="w1", pid=4242))
+        await wrapper.send(event("tool_request", session="w1", tool="Allow this action? (Y/n)"))
+        scraped = await recv_type(ui, "tool_request")
+
+        bar = BarClient("Dulus", "w1", url=url).connect()  # the agent itself, same row
+        bar.event("tool_request", {"tool": "Bash", "args": "npm test", "can_always": True},
+                  request_id="n1")
+        withdrawn = await recv_type(ui, "request_resolved")
+        assert withdrawn["request_id"] == scraped["request_id"]
+        native = await recv_type(wrapper, "native")
+        assert (native["session_id"], native["reports"]) == ("w1", "permissions")
+        assert (await recv_type(ui, "tool_request"))["request_id"] == "n1"
+
+        # The wrapper's scraped prompts for that session are dropped from now on…
+        await wrapper.send(event("tool_request", session="w1", tool="Allow this action? (Y/n)"))
+        await silent(ui, 0.3)
+        assert [p.request_id for p in server.store.permissions] == ["n1"]
+        # …while its status lines still count until the agent reports its own.
+        await wrapper.send(event("message", session="w1", text="compiling"))
+        assert (await recv_type(ui, "message"))["payload"]["text"] == "compiling"
+        bar.event("message", {"text": "Running tests"})
+        assert (await recv_type(wrapper, "native"))["reports"] == "status"
+        await recv_type(ui, "message")
+        await wrapper.send(event("message", session="w1", text="▒▒ redraw garbage"))
+        await silent(ui, 0.3)
+        assert "garbage" not in server.store.sessions[("Dulus", "w1")].message
+        assert server.store.sessions[("Dulus", "w1")].pid == 4242  # the wrapper's facts stay
+        bar.close()
+        await wrapper.close()
+        await ui.close()
+
+    asyncio.run(scenario())
+    assert server._native == {}  # the session ended with its wrapper
+
+
+def test_an_agent_that_only_reports_status_keeps_its_wrappers_prompts(hub):
+    """Reporting model and context through the SDK must not silence the
+    wrapper's Allow / Deny for an agent that still asks in its terminal."""
+    server, url = hub
+
+    async def scenario():
+        ui, _, _ = await connect_ui(url)
+        wrapper = await connect_wrapper(url)
+        await wrapper.send(event("session_started", session="w1"))
+        with BarClient("Dulus", "w1", url=url) as bar:  # model + context, nothing else
+            bar.event("session_started", {"model": "kimi-k2.5", "ctx": "12%"})
+        assert (await recv_type(wrapper, "native"))["reports"] == "status"
+        await wrapper.send(event("tool_request", session="w1", tool="Allow this action? (Y/n)"))
+        assert (await recv_type(ui, "tool_request"))["payload"]["tool"] == "Allow this action? (Y/n)"
+        assert len(server.store.permissions) == 1
+        await wrapper.close()
+        await ui.close()
+
+    asyncio.run(scenario())
+
+
+def test_other_clients_never_silence_a_wrapper_for_another_session(hub):
+    server, url = hub
+
+    async def scenario():
+        async with websockets.connect(url) as wrapper:
+            await wrapper.send(json.dumps({"type": "hello", "role": "agent", "wrapper": True,
+                                           "agent": "_health", "session_id": "_health"}))
+            await recv_type(wrapper, "welcome")
+            await wrapper.send(event("tool_request", session="w1", tool="Allow? (y/N)"))
+            assert wait_for(lambda: server.store.permissions)
+            with BarClient("Dulus", "other", url=url) as bar:
+                bar.event("message", {"text": "hi"})
+            await silent(wrapper, 0.3)
+            assert len(server.store.permissions) == 1
+
+    asyncio.run(scenario())
