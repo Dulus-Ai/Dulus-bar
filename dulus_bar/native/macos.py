@@ -7,6 +7,7 @@ osascript-based activation and a plain top-most window (no notch hugging).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import List, Optional
 
@@ -183,14 +184,16 @@ class MacOSBackend(NativeBackend):
             with os.fdopen(fd, "w") as f:
                 f.write("#!/bin/bash\n")
                 if title:
-                    f.write(f"echo -ne '\\033]0;{title}\\007'\n")
+                    # Quoted: the title is usually a file name ("kev's agent").
+                    printable = "".join(ch for ch in title if ch.isprintable())
+                    f.write("printf '\\033]0;%s\\007' " + shlex.quote(printable) + "\n")
                 f.write(shell_cmd + "\n")
             os.chmod(script_file, 0o755)
         except Exception:
             script_file = None
 
         run_line = f"bash {shlex.quote(script_file)}" if script_file else shell_cmd
-        # Prefer iTerm if present, else Terminal.
+        # Terminal.app first (every Mac has it), then iTerm.
         script_iterm = (
             'tell application "iTerm"\n'
             ' create window with default profile\n'

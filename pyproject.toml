@@ -55,7 +55,15 @@ include = ["dulus_bar*"]
 exclude = ["wrappers*", "assets*", "dist*", "build*"]
 
 [tool.setuptools.package-data]
-dulus_bar = ["assets/*.png"]
+dulus_bar = [
+    "assets/*.png",
+    # The native macOS island, built on the user's Mac on first start. The
+    # tests too: SwiftPM refuses a package whose test target has no folder.
+    "macos/Package.swift",
+    "macos/Sources/DulusBarNative/*.swift",
+    "macos/Sources/DulusBarNative/Resources/*",
+    "macos/Tests/DulusBarNativeTests/*.swift",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
