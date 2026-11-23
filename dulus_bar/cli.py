@@ -97,7 +97,7 @@ def _prebuild_native() -> Dict[str, str]:
     the detached copy (which skips building if it failed here)."""
     from . import macos_native
 
-    if not macos_native.should_use_native() or macos_native.native_available():
+    if not macos_native.should_use_native() or hasattr(sys, "_MEIPASS") or macos_native.native_available():
         return {}
     if os.environ.get("DULUS_BAR_NATIVE_BINARY") or os.environ.get("DULUS_BAR_NATIVE_AUTOBUILD") == "0":
         return {}

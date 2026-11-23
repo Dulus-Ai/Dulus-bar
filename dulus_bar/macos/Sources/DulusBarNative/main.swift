@@ -41,7 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureBranding() {
-        guard let url = Bundle.module.url(
+        // The frozen app places the SwiftPM resource bundle beside this helper.
+        let sibling = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+            .appendingPathComponent("DulusBarNative_DulusBarNative.bundle")
+        let resources = Bundle(url: sibling) ?? Bundle.module
+        guard let url = resources.url(
             forResource: "dulus-bird",
             withExtension: "png"
         ), let image = NSImage(contentsOf: url) else { return }
