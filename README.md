@@ -52,7 +52,8 @@ and it shows up. We built the island we wanted; here it is for the whole world. 
 
 ## Install
 
-Requires Python 3.10+.
+Download a desktop build from the **Desktop builds** workflow, or install with
+Python 3.10+. The [build table](#desktop-builds) lists the files for each CPU.
 
 ```bash
 pip install dulus-bar
@@ -254,17 +255,58 @@ dulus_bar/
 
 ---
 
-## Build a standalone binary (optional)
+## Desktop builds
+
+Open **Actions → Desktop builds**, select a successful run and download the
+artifact for your machine. The workflow runs on pull requests, pushes to
+`main`, and `v*` tags. **Run workflow** also builds the same set on demand.
+
+| System | CPU | File inside the Actions artifact |
+| --- | --- | --- |
+| macOS 13+ | Intel x86-64 and Apple Silicon ARM64 | `DulusBar-macos-universal2.zip` |
+| Windows | Intel/AMD x86-64 | `DulusBar-windows-x86_64.zip` |
+| Windows 11 | ARM64 | `DulusBar-windows-arm64.zip` |
+| GNU/Linux desktop | Intel/AMD x86-64, glibc 2.35+ | `DulusBar-linux-x86_64.tar.gz` |
+| GNU/Linux desktop | ARM64, glibc 2.39+ | `DulusBar-linux-arm64.tar.gz` |
+| Debian 13 and compatible distributions | Includes 32-bit x86 (i386) and ARM (armhf) | `dulus-bar_<version>_all.deb` |
+
+Unpack the standalone archive and launch `DulusBar.app`, `DulusBar.exe`, or
+`./DulusBar`. The executable also runs CLI commands such as `status` and
+`hooks install`. The macOS app includes the compiled Swift island and its
+resources. It runs without Python or Xcode installed.
+
+The Linux archives target glibc and a desktop with X11 or XWayland. On
+Debian, `sudo apt install ./dulus-bar_*_all.deb` installs the launcher and
+the distribution's native Python and Qt libraries. For other Linux systems,
+including musl, the system-packages artifact also contains a `py3-none-any`
+wheel. Where the distribution packages PySide6, websockets and psutil at the
+versions in `pyproject.toml`, install those packages, create a venv with
+`--system-site-packages`, and run `python -m pip install --no-deps ./dulus_bar-*.whl`
+in that venv. Windows builds require a 64-bit OS because the official PySide6
+Windows wheels cover x86-64 and ARM64. macOS 13+ runs 64-bit applications.
+
+For Interant, extract the inner ZIP with `ditto -x -k DulusBar-macos-universal2.zip .`
+to preserve symlinks. Embed the complete `DulusBar.app` under the host app's
+`Contents/Helpers/` and launch the nested `Contents/MacOS/DulusBar` executable.
+The public build uses an ad-hoc signature. Apply Interant's App Sandbox
+entitlements and distribution signatures to the nested code and host app in
+its private release pipeline before submitting to the Mac App Store.
+
+### Build locally
+
+On the target OS, use Python of the target architecture. On macOS the build
+also needs Xcode or the Command Line Tools for the Swift helper.
 
 ```bash
-pip install pyinstaller
-pyinstaller --noconfirm DulusBar.spec
+python -m pip install ".[build]"
+python -m PyInstaller --clean --noconfirm DulusBar.spec
 ```
 
-Output lands in `dist/` — `DulusBar.exe` on Windows, `DulusBar.app` on macOS
-(bundled as an `LSUIElement`, so no Dock icon). The binary is the CLI too
-(`DulusBar hooks install`, `DulusBar status`, …): hooks and launched agents
-re-invoke it, so no separate Python install is needed.
+Outputs land in `dist/`. To build the two-architecture Mac archive, use Xcode
+and a universal2 Python from python.org, then run
+`PYTHON=/path/to/python3 bash scripts/build-macos-universal.sh`. On Debian or
+Ubuntu, `bash scripts/build-deb.sh` produces the architecture-independent
+`.deb` and Python wheel.
 
 ---
 
@@ -276,8 +318,8 @@ re-invoke it, so no separate Python install is needed.
   one in the menu bar's empty middle), with a small light per live agent under
   it, and it pours open into the card. Hold **Allow** to always allow; click a
   session to bring up the terminal or editor it runs in; agents opened from its
-  menu bar icon are wired to the island. Without the Xcode Command Line Tools it
-  uses the Qt island (notch-aware through `pyobjc`).
+  menu bar icon are wired to the island. Source and pip installs use the Qt
+  island (notch-aware through `pyobjc`) when the Xcode Command Line Tools are unavailable.
 - **Linux** — anchors to the top of the *work area* (never under a panel/dock)
   and takes itself out of the window manager's placement policy on X11, so it
   stays at the top instead of being re-centred. On Wayland it runs through

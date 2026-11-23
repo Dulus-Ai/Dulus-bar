@@ -1,0 +1,154 @@
+name: Desktop builds
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  standalone:
+    name: ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, artifact: DulusBar-linux-x86_64, python_arch: x64, machine: 'Advanced Micro Devices X86-64'}
+          - {runner: ubuntu-24.04-arm, artifact: DulusBar-linux-arm64, python_arch: arm64, machine: AArch64}
+          - {runner: windows-2022, artifact: DulusBar-windows-x86_64, python_arch: x64, machine: '0x8664'}
+          - {runner: windows-11-arm, artifact: DulusBar-windows-arm64, python_arch: arm64, machine: '0xAA64'}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.python_arch }}
+      - name: Install Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libfontconfig1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 xauth xvfb
+      - run: python -m pip install ".[build]"
+      - name: Run the Python suite
+        if: matrix.runner == 'ubuntu-22.04'
+        run: |
+          python -m pip install ".[dev]"
+          python -m pytest -q
+      - run: python -m PyInstaller --clean --noconfirm DulusBar.spec
+      - name: Check ELF architecture, start on X11 and archive
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+        run: |
+          readelf -h dist/DulusBar | grep 'Machine:' | grep -F '${{ matrix.machine }}'
+          xvfb-run -a python scripts/smoke-build.py dist/DulusBar
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist DulusBar
+      - name: Check PE architecture, start the app and archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = [IO.File]::ReadAllBytes("$PWD/dist/DulusBar.exe")
+          $pe = [BitConverter]::ToInt32($exe, 0x3C)
+          if ([BitConverter]::ToUInt16($exe, $pe + 4) -ne ${{ matrix.machine }}) { throw "Wrong PE machine" }
+          python scripts/smoke-build.py dist/DulusBar.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive dist/DulusBar.exe "dist/${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.*
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal2
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install universal2 CPython
+        shell: bash
+        env:
+          PYTHON_VERSION: '3.13.12'
+        run: |
+          pkg="$RUNNER_TEMP/python.pkg"
+          curl -fsSL --retry 3 "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-macos11.pkg" -o "$pkg"
+          pkgutil --check-signature "$pkg" | grep -F 'Developer ID Installer: Python Software Foundation'
+          sudo installer -pkg "$pkg" -target /
+      - name: Build and verify both architectures
+        env:
+          PYTHON: /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+        run: bash scripts/build-macos-universal.sh
+      - name: Start the archived app on Apple Silicon
+        run: |
+          test "$(uname -m)" = arm64
+          ditto -x -k dist/DulusBar-macos-universal2.zip "$RUNNER_TEMP/unpacked"
+          python3 scripts/smoke-build.py "$RUNNER_TEMP/unpacked/DulusBar.app/Contents/MacOS/DulusBar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DulusBar-macos-universal2
+          path: dist/DulusBar-macos-universal2.zip
+          if-no-files-found: error
+
+  macos-intel:
+    name: Start the universal app on Intel
+    needs: macos
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: DulusBar-macos-universal2
+      - run: |
+          test "$(uname -m)" = x86_64
+          ditto -x -k DulusBar-macos-universal2.zip "$RUNNER_TEMP/unpacked"
+          python3 scripts/smoke-build.py "$RUNNER_TEMP/unpacked/DulusBar.app/Contents/MacOS/DulusBar"
+
+  system-packages:
+    name: Linux system packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DulusBar-linux-system-packages
+          path: |
+            dist/*.deb
+            dist/*.whl
+          if-no-files-found: error
+
+  linux-32bit:
+    name: Debian ${{ matrix.arch }} desktop
+    needs: system-packages
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [i386, armhf]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: DulusBar-linux-system-packages
+          path: dist
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'armhf'
+        with:
+          platforms: arm
+      - name: Install the .deb with 32-bit Python and Qt, then launch it
+        run: |
+          docker run --rm -v "$PWD/dist:/packages:ro" \
+            -v "$PWD/scripts/smoke-build.py:/smoke-build.py:ro" debian:trixie-slim sh -ec '
+            arch=$1
+            dpkg --add-architecture "$arch"
+            apt-get update
+            apt-get -o APT::Architecture="$arch" install -y --no-install-recommends \
+              python3:"$arch" python3-pyside6.qtwidgets:"$arch" qt6-qpa-plugins:"$arch" /packages/*.deb
+            python3 -c "import struct; assert struct.calcsize(\"P\") == 4"
+            python3 /smoke-build.py /usr/bin/dulusbar
+          ' sh "${{ matrix.arch }}"

@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import stat
 import sys
@@ -19,7 +20,7 @@ def test_native_binary_lives_in_the_cache_per_source_version(tmp_path):
     package = macos_native.package_root()
     binary = macos_native.native_binary(package)
     assert binary.parent.parent.parent == macos_native.cache_root()
-    assert binary.parent.parent.name == f"native-{macos_native.source_digest(package)}"
+    assert binary.parent.parent.name == f"native-{platform.machine()}-{macos_native.source_digest(package)}"
     assert binary.name == "DulusBarNative" and binary.parent.name == "release"
 
 
@@ -27,6 +28,43 @@ def test_native_binary_override(tmp_path):
     target = tmp_path / "custom-helper"
     with patch.dict(os.environ, {"DULUS_BAR_NATIVE_BINARY": str(target)}):
         assert macos_native.native_binary() == target.resolve()
+
+
+def test_rosetta_and_arm_python_get_separate_builds(monkeypatch):
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    intel = macos_native.native_binary()
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    assert macos_native.native_binary() != intel
+
+
+def test_universal_helper_uses_the_products_directory_swift_reports(tmp_path, monkeypatch):
+    # A multi-arch build can use Xcode's apple/Products/Release layout.
+    scratch = tmp_path / "swift build"
+    products = scratch / "apple" / "Products" / "Release"
+    products.mkdir(parents=True)
+    helper = products / "DulusBarNative"
+    helper.touch()
+    package = macos_native.package_root()
+    command = ["swift", "build", "-c", "release", "--package-path", str(package),
+               "--scratch-path", str(scratch), "--arch", "x86_64", "--arch", "arm64"]
+    monkeypatch.setattr(macos_native, "swift_toolchain", lambda: "swift")
+    with (
+        patch.object(macos_native.subprocess, "run") as build,
+        patch.object(macos_native.subprocess, "check_output", return_value=f"{products}\n") as locate,
+    ):
+        assert macos_native.compile_native(package, scratch, ["x86_64", "arm64"]) == helper
+    build.assert_called_once_with([*command, "--product", "DulusBarNative"], check=True)
+    locate.assert_called_once_with([*command, "--show-bin-path"], text=True)
+
+
+def test_frozen_app_uses_its_packaged_helper_before_the_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert macos_native.native_binary() == tmp_path / "DulusBarNative"
+    with pytest.raises(FileNotFoundError, match="packaged native helper"):
+        macos_native.run_native()
+    override = tmp_path / "custom-helper"
+    monkeypatch.setenv("DULUS_BAR_NATIVE_BINARY", str(override))
+    assert macos_native.native_binary() == override
 
 
 def test_a_source_change_means_a_new_build_but_finder_litter_does_not(tmp_path):

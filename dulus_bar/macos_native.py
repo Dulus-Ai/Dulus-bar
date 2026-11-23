@@ -4,7 +4,7 @@ The Swift package ships inside ``dulus_bar`` (``dulus_bar/macos``), so a pip
 install gets the native island as well as a git checkout does. It's built
 once per version of its sources into the user's cache — site-packages is no
 place for build products — and this Python process stays the WebSocket hub
-the native island talks to.
+the native island talks to. The standalone .app ships its compiled helper.
 
     python -m dulus_bar.macos_native     # build it now (setup.sh does this)
 """
@@ -15,6 +15,7 @@ import atexit
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -23,13 +24,15 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 from . import protocol as P
-from .server import AgentEventServer
+
+if TYPE_CHECKING:
+    from .server import AgentEventServer
 
 _NATIVE_EXECUTABLE = "DulusBarNative"
-_BUILD_DIR = re.compile(r"^native-[0-9a-f]{16}$")
+_BUILD_DIR = re.compile(r"^native-(?:(?:arm64|x86_64)-)?[0-9a-f]{16}$")
 # The cache is per user, shared by every install (a checkout and a pip
 # install, two venvs…): another version's build goes only once nobody has
 # started it for this long.
@@ -75,14 +78,16 @@ def cache_root() -> Path:
 def build_dir(package: Optional[Path] = None) -> Path:
     """Where this version of the sources is built. A new version gets a new
     directory, so an upgrade can never run a helper built from older sources."""
-    return cache_root() / f"native-{source_digest(package)}"
+    return cache_root() / f"native-{platform.machine()}-{source_digest(package)}"
 
 
 def native_binary(package: Optional[Path] = None) -> Path:
-    """The helper to run: the user's override, else the build for these sources."""
+    """Use the explicit override, the packaged helper, or the matching source build."""
     override = os.environ.get("DULUS_BAR_NATIVE_BINARY")
     if override:
         return Path(override).expanduser().resolve()
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / _NATIVE_EXECUTABLE
     return build_dir(package) / "release" / _NATIVE_EXECUTABLE
 
 
@@ -132,22 +137,29 @@ def _mark_used(build: Path) -> None:
         pass
 
 
-def build_native(package: Optional[Path] = None) -> Path:
-    """Build the native helper and return its executable path."""
-    package = package or package_root()
+def compile_native(package: Path, scratch: Path, architectures: Sequence[str]) -> Path:
+    """Build the requested slices and return the SwiftPM product's executable."""
     if not (package / "Package.swift").is_file():
         raise FileNotFoundError(f"native package missing: {package}")
     swift = swift_toolchain()
     if swift is None:
         raise FileNotFoundError("no Swift toolchain (install the Xcode Command Line Tools: xcode-select --install)")
-    scratch = build_dir(package)
-    subprocess.run(
-        [swift, "build", "-c", "release", "--package-path", str(package), "--scratch-path", str(scratch)],
-        check=True,
-    )
-    binary = scratch / "release" / _NATIVE_EXECUTABLE
+    command = [swift, "build", "-c", "release", "--package-path", str(package), "--scratch-path", str(scratch)]
+    for arch in architectures:
+        command.extend(["--arch", arch])
+    subprocess.run([*command, "--product", _NATIVE_EXECUTABLE], check=True)
+    products = subprocess.check_output([*command, "--show-bin-path"], text=True).strip()
+    binary = Path(products) / _NATIVE_EXECUTABLE
     if not binary.is_file():
         raise FileNotFoundError(f"native build completed without {binary}")
+    return binary
+
+
+def build_native(package: Optional[Path] = None) -> Path:
+    """Build the native helper in the per-architecture source cache."""
+    package = package or package_root()
+    scratch = build_dir(package)
+    binary = compile_native(package, scratch, [platform.machine()])
     _prune_builds(scratch)
     return binary
 
@@ -188,12 +200,16 @@ def run_native() -> int:
     if not native_available():
         if os.environ.get("DULUS_BAR_NATIVE_BINARY"):
             raise FileNotFoundError(f"DULUS_BAR_NATIVE_BINARY is not an executable: {binary}")
+        if hasattr(sys, "_MEIPASS"):
+            raise FileNotFoundError(f"packaged native helper missing or not executable: {binary}")
         if os.environ.get("DULUS_BAR_NATIVE_AUTOBUILD", "1") == "0":
             raise FileNotFoundError(f"native helper not built: {binary} (python -m dulus_bar.macos_native)")
         print("[dulusbar] building the native macOS island…")
         binary = build_native()
-    if not os.environ.get("DULUS_BAR_NATIVE_BINARY"):
+    if not hasattr(sys, "_MEIPASS") and not os.environ.get("DULUS_BAR_NATIVE_BINARY"):
         _mark_used(build_dir())
+
+    from .server import AgentEventServer
 
     port = P.configured_port()
     server = AgentEventServer(port=port, publish=True)
