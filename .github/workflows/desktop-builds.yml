@@ -33,7 +33,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libfontconfig1 libxkbcommon-x11-0 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 xauth xvfb
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libdbus-1-3 xauth xvfb
       - run: python -m pip install ".[build]"
       - name: Run the Python suite
         if: matrix.runner == 'ubuntu-22.04'
@@ -45,6 +46,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: xcb
+          QT_DEBUG_PLUGINS: '1'
         run: |
           readelf -h dist/DulusBar | grep 'Machine:' | grep -F '${{ matrix.machine }}'
           xvfb-run -a python scripts/smoke-build.py dist/DulusBar
@@ -129,7 +131,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [i386, armhf]
+        include:
+          - {arch: i386, platform: linux/386}
+          - {arch: armhf, platform: linux/arm/v7}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -142,13 +146,12 @@ jobs:
           platforms: arm
       - name: Install the .deb with 32-bit Python and Qt, then launch it
         run: |
-          docker run --rm -v "$PWD/dist:/packages:ro" \
+          docker run --rm --platform "${{ matrix.platform }}" -v "$PWD/dist:/packages:ro" \
             -v "$PWD/scripts/smoke-build.py:/smoke-build.py:ro" debian:trixie-slim sh -ec '
-            arch=$1
-            dpkg --add-architecture "$arch"
+            test "$(dpkg --print-architecture)" = "$1"
             apt-get update
-            apt-get -o APT::Architecture="$arch" install -y --no-install-recommends \
-              python3:"$arch" python3-pyside6.qtwidgets:"$arch" qt6-qpa-plugins:"$arch" /packages/*.deb
+            apt-get install -y --no-install-recommends \
+              python3 python3-pyside6.qtwidgets qt6-qpa-plugins /packages/*.deb
             python3 -c "import struct; assert struct.calcsize(\"P\") == 4"
             python3 /smoke-build.py /usr/bin/dulusbar
           ' sh "${{ matrix.arch }}"
